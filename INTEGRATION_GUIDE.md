@@ -61,7 +61,8 @@ The repository includes a PowerShell test script (`Test-1.ps1`) that demonstrate
 
 1. **AWS CLI** configured with credentials that can authenticate against Cognito
 2. **The CAC server running** on `http://localhost:3000`
-3. **A `config.json` file** configured for your Cognito User Pool and policies
+3. **A `config.json` file** configured for your Cognito User Pool and Amazon Verified Permissions policy store
+4. **Environment variables defined with credentials to access the User pool and policy store
 
 ### Running the Tests
 
@@ -74,6 +75,22 @@ The repository includes a PowerShell test script (`Test-1.ps1`) that demonstrate
    ```powershell
    .\Test-1.ps1
    ```
+
+### Loading Test Policies
+
+By default, the test script runs against whatever policies exist in your AVP policy store. To reset the policy store with the test policies defined in `avp-policies.txt`, use the `-ResetAvpPolicies` flag:
+
+```powershell
+.\Test-1.ps1 -ResetAvpPolicies
+```
+
+This will:
+1. Read the policy store ID from `config.json`
+2. Delete all existing static policies from the AVP policy store
+3. Create new policies from `avp-policies.txt`
+4. Run the tests
+
+**Note:** This requires AWS credentials with `verifiedpermissions:ListPolicies`, `verifiedpermissions:DeletePolicy`, and `verifiedpermissions:CreatePolicy` permissions.
 
 ### What the Test Script Does
 
