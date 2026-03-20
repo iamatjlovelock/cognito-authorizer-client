@@ -1,0 +1,443 @@
+import { readFileSync, writeFileSync } from 'fs';
+import { TokenValidator, TokenValidatorConfig } from './cognito/token-validator.js';
+import { JwksClient } from './cognito/jwks-client.js';
+import { CognitoTokenClaims, ValidatedToken } from './cognito/token-types.js';
+import { EntityBuilder, EntityBuilderConfig, CedarEntity, CedarValue } from './cedar/entity-builder.js';
+import { CedarAuthorizer, AuthorizationResponse, Decision } from './cedar/authorizer.js';
+import { Config, isAVPConfig, isFileConfig } from './config.js';
+import { AVPPolicyStore } from './avp/policy-store.js';
+
+/**
+ * Authorization request from the application
+ */
+export interface AuthzRequest {
+  /**
+   * The token to authorize (ID or access token)
+   */
+  token: string;
+
+  /**
+   * The action being performed
+   */
+  action: string;
+
+  /**
+   * The resource being accessed
+   */
+  resource: {
+    type: string;
+    id: string;
+  };
+
+  /**
+   * Additional context for the authorization decision
+   */
+  context?: Record<string, unknown>;
+
+  /**
+   * Additional entities to include in the request
+   */
+  additionalEntities?: CedarEntity[];
+}
+
+/**
+ * Authorization response
+ */
+export interface AuthzResponse {
+  /**
+   * Whether the request is allowed
+   */
+  allowed: boolean;
+
+  /**
+   * The decision (Allow or Deny)
+   */
+  decision: Decision;
+
+  /**
+   * The principal that was authorized
+   */
+  principal: { type: string; id: string };
+
+  /**
+   * Diagnostic information
+   */
+  diagnostics: {
+    reason: string[];
+    errors: string[];
+  };
+
+  /**
+   * Token claims (for debugging)
+   */
+  claims?: CognitoTokenClaims;
+}
+
+/**
+ * Cognito Authorization Client
+ *
+ * Provides local authorization for applications using Cognito tokens and Cedar policies.
+ */
+export class CognitoAuthorizationClient {
+  private readonly tokenValidator: TokenValidator;
+  private readonly entityBuilder: EntityBuilder;
+  private authorizer: CedarAuthorizer;
+  private readonly config: Config;
+  private avpPolicyStore?: AVPPolicyStore;
+  private refreshInterval?: ReturnType<typeof setInterval>;
+  private cacheCheckInterval?: ReturnType<typeof setInterval>;
+
+  private constructor(
+    config: Config,
+    tokenValidator: TokenValidator,
+    entityBuilder: EntityBuilder,
+    authorizer: CedarAuthorizer,
+    avpPolicyStore?: AVPPolicyStore
+  ) {
+    this.config = config;
+    this.tokenValidator = tokenValidator;
+    this.entityBuilder = entityBuilder;
+    this.authorizer = authorizer;
+    this.avpPolicyStore = avpPolicyStore;
+  }
+
+  /**
+   * Create a new authorization client (async factory method)
+   */
+  static async create(config: Config): Promise<CognitoAuthorizationClient> {
+    // Build issuer URL from region and user pool ID
+    const issuer = JwksClient.buildIssuerUrl(config.cognito.region, config.cognito.userPoolId);
+
+    // Initialize token validator
+    const validatorConfig: TokenValidatorConfig = {
+      issuer,
+      audience: config.cognito.clientId,
+      clientId: config.cognito.clientId,
+    };
+    const tokenValidator = new TokenValidator(validatorConfig);
+
+    // Initialize entity builder
+    const entityConfig: EntityBuilderConfig = {
+      namespace: config.cedar.namespace,
+      userTypeName: config.entities?.userTypeName ?? 'User',
+      groupTypeName: config.entities?.groupTypeName ?? 'CognitoGroup',
+      includeCustomAttributes: config.entities?.includeCustomAttributes ?? true,
+      includeProfileClaims: config.entities?.includeProfileClaims ?? true,
+      attributeMapping: config.entities?.attributeMapping,
+    };
+    const entityBuilder = new EntityBuilder(entityConfig);
+
+    // Load policies and schema
+    let policies: string;
+    let schema: string | undefined;
+    let avpPolicyStore: AVPPolicyStore | undefined;
+
+    if (isAVPConfig(config.cedar)) {
+      // Load from Amazon Verified Permissions
+      avpPolicyStore = new AVPPolicyStore({
+        region: config.cognito.region,
+        policyStoreId: config.cedar.policyStoreId,
+      });
+
+      const policyData = await avpPolicyStore.loadPolicies();
+      policies = policyData.policies;
+
+      // Use AVP schema or local override
+      if (config.cedar.schemaOverride) {
+        schema = config.cedar.schemaOverrideIsInline
+          ? config.cedar.schemaOverride
+          : readFileSync(config.cedar.schemaOverride, 'utf-8');
+      } else if (config.cedar.loadSchemaFromAVP && policyData.schema) {
+        schema = policyData.schema;
+      }
+
+      // Write local copies of AVP policies and schema for transparency
+      const policiesNotice = `# ============================================================
+# THIS FILE IS A READ-ONLY COPY OF POLICIES FROM AVP
+# ============================================================
+# Policy Store ID: ${config.cedar.policyStoreId}
+# Generated: ${new Date().toISOString()}
+#
+# DO NOT EDIT THIS FILE DIRECTLY
+# All changes must be applied to the policy store in
+# Amazon Verified Permissions (AVP).
+# ============================================================
+
+`;
+      writeFileSync('./avp-policies.txt', policiesNotice + policies, 'utf-8');
+      console.log('  - Written local copy of policies to avp-policies.txt');
+
+      if (policyData.schema) {
+        const schemaObj = {
+          _notice: {
+            message: 'THIS FILE IS A READ-ONLY COPY OF THE SCHEMA FROM AVP',
+            policyStoreId: config.cedar.policyStoreId,
+            generated: new Date().toISOString(),
+            warning: 'DO NOT EDIT THIS FILE DIRECTLY. All changes must be applied to the schema defined for the policy store in Amazon Verified Permissions (AVP).',
+          },
+          schema: JSON.parse(policyData.schema),
+        };
+        writeFileSync('./avp-schema.json', JSON.stringify(schemaObj, null, 2), 'utf-8');
+        console.log('  - Written local copy of schema to avp-schema.json');
+      }
+
+      // Store the initial lastUpdatedDate for cache checking
+      await avpPolicyStore.updateLastKnownDate();
+
+      console.log(`Loaded ${policyData.policyMetadata.length} policies from AVP policy store: ${config.cedar.policyStoreId}`);
+    } else if (isFileConfig(config.cedar)) {
+      // Load from file
+      if (config.cedar.policiesAreInline) {
+        policies = config.cedar.policies;
+        schema = config.cedar.schema;
+      } else {
+        policies = readFileSync(config.cedar.policies, 'utf-8');
+        if (config.cedar.schema) {
+          schema = readFileSync(config.cedar.schema, 'utf-8');
+        }
+      }
+    } else {
+      throw new Error('Invalid cedar configuration');
+    }
+
+    // Initialize authorizer
+    const authorizer = new CedarAuthorizer({ policies, schema });
+
+    const client = new CognitoAuthorizationClient(
+      config,
+      tokenValidator,
+      entityBuilder,
+      authorizer,
+      avpPolicyStore
+    );
+
+    // Set up policy refresh if configured (legacy interval-based refresh)
+    if (isAVPConfig(config.cedar) && config.cedar.refreshIntervalSeconds > 0) {
+      client.startPolicyRefresh(config.cedar.refreshIntervalSeconds);
+    }
+
+    // Start cache checking for AVP (checks periodically if policy store has been updated)
+    if (isAVPConfig(config.cedar) && config.cedar.refreshIntervalSeconds > 0) {
+      client.startCacheCheck(config.cedar.refreshIntervalSeconds);
+    }
+
+    return client;
+  }
+
+  /**
+   * Start automatic policy refresh
+   */
+  private startPolicyRefresh(intervalSeconds: number): void {
+    console.log(`Starting policy refresh every ${intervalSeconds} seconds`);
+    this.refreshInterval = setInterval(async () => {
+      try {
+        await this.refreshPoliciesFromAVP();
+      } catch (error) {
+        console.error('Error refreshing policies:', error);
+      }
+    }, intervalSeconds * 1000);
+  }
+
+  /**
+   * Stop automatic policy refresh
+   */
+  stopPolicyRefresh(): void {
+    if (this.refreshInterval) {
+      clearInterval(this.refreshInterval);
+      this.refreshInterval = undefined;
+    }
+  }
+
+  /**
+   * Start cache checking (periodically checks if policy store has been updated)
+   */
+  private startCacheCheck(intervalSeconds: number): void {
+    console.log(`Starting cache check every ${intervalSeconds} seconds`);
+    this.cacheCheckInterval = setInterval(async () => {
+      try {
+        await this.checkAndRefreshCache();
+      } catch (error) {
+        console.error('Error checking cache:', error);
+      }
+    }, intervalSeconds * 1000);
+  }
+
+  /**
+   * Stop cache checking
+   */
+  stopCacheCheck(): void {
+    if (this.cacheCheckInterval) {
+      clearInterval(this.cacheCheckInterval);
+      this.cacheCheckInterval = undefined;
+    }
+  }
+
+  /**
+   * Check if policy store has been updated and refresh if needed
+   */
+  async checkAndRefreshCache(): Promise<boolean> {
+    if (!this.avpPolicyStore) {
+      return false;
+    }
+
+    const hasUpdates = await this.avpPolicyStore.hasUpdates();
+    if (hasUpdates) {
+      console.log('Policy store has been updated, refreshing cache...');
+      await this.refreshPoliciesFromAVP();
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Manually refresh policies from AVP
+   */
+  async refreshPoliciesFromAVP(): Promise<void> {
+    if (!this.avpPolicyStore) {
+      throw new Error('AVP policy store not configured');
+    }
+
+    console.log('Refreshing policies from AVP...');
+    const policyData = await this.avpPolicyStore.loadPolicies();
+
+    this.authorizer.updatePolicies(policyData.policies);
+
+    if (isAVPConfig(this.config.cedar) && this.config.cedar.loadSchemaFromAVP && policyData.schema) {
+      this.authorizer.updateSchema(policyData.schema);
+    }
+
+    // Update local copies for transparency
+    if (isAVPConfig(this.config.cedar)) {
+      const policiesNotice = `# ============================================================
+# THIS FILE IS A READ-ONLY COPY OF POLICIES FROM AVP
+# ============================================================
+# Policy Store ID: ${this.config.cedar.policyStoreId}
+# Generated: ${new Date().toISOString()}
+#
+# DO NOT EDIT THIS FILE DIRECTLY
+# All changes must be applied to the policy store in
+# Amazon Verified Permissions (AVP).
+# ============================================================
+
+`;
+      writeFileSync('./avp-policies.txt', policiesNotice + policyData.policies, 'utf-8');
+
+      if (policyData.schema) {
+        const schemaObj = {
+          _notice: {
+            message: 'THIS FILE IS A READ-ONLY COPY OF THE SCHEMA FROM AVP',
+            policyStoreId: this.config.cedar.policyStoreId,
+            generated: new Date().toISOString(),
+            warning: 'DO NOT EDIT THIS FILE DIRECTLY. All changes must be applied to the schema defined for the policy store in Amazon Verified Permissions (AVP).',
+          },
+          schema: JSON.parse(policyData.schema),
+        };
+        writeFileSync('./avp-schema.json', JSON.stringify(schemaObj, null, 2), 'utf-8');
+      }
+    }
+
+    // Update the last known date after refresh
+    await this.avpPolicyStore.updateLastKnownDate();
+
+    console.log(`Refreshed ${policyData.policyMetadata.length} policies`);
+  }
+
+  /**
+   * Authorize a request
+   */
+  async authorize(request: AuthzRequest): Promise<AuthzResponse> {
+    // Validate the token
+    let validatedToken: ValidatedToken;
+    try {
+      validatedToken = await this.tokenValidator.validateToken(request.token);
+    } catch (error) {
+      return {
+        allowed: false,
+        decision: 'Deny',
+        principal: { type: 'Unknown', id: 'unknown' },
+        diagnostics: {
+          reason: [],
+          errors: [error instanceof Error ? error.message : 'Token validation failed'],
+        },
+      };
+    }
+
+    // Build entities from token claims
+    const entities = this.entityBuilder.buildEntities(validatedToken.claims);
+
+    // Add any additional entities
+    if (request.additionalEntities) {
+      entities.push(...request.additionalEntities);
+    }
+
+    // Get principal from claims
+    const principal = this.entityBuilder.getPrincipal(validatedToken.claims);
+
+    // Build action and resource
+    const action = this.entityBuilder.buildAction(request.action);
+    const resource = this.entityBuilder.buildResource(request.resource.type, request.resource.id);
+
+    // Debug logging
+    console.log('=== Authorization Request Debug ===');
+    console.log('Principal:', JSON.stringify(principal));
+    console.log('Action:', JSON.stringify(action));
+    console.log('Resource:', JSON.stringify(resource));
+    console.log('Entities:', JSON.stringify(entities, null, 2));
+
+    // Make authorization decision
+    const result = this.authorizer.isAuthorized({
+      principal,
+      action,
+      resource,
+      context: request.context as Record<string, CedarValue> | undefined,
+      entities,
+    });
+
+    console.log('Result:', JSON.stringify(result));
+    console.log('=== End Debug ===');
+
+    return {
+      allowed: result.decision === 'Allow',
+      decision: result.decision,
+      principal,
+      diagnostics: result.diagnostics,
+      claims: validatedToken.claims,
+    };
+  }
+
+  /**
+   * Validate a token without authorization
+   */
+  async validateToken(token: string): Promise<ValidatedToken> {
+    return this.tokenValidator.validateToken(token);
+  }
+
+  /**
+   * Reload policies from configuration
+   */
+  reloadPolicies(policies: string): void {
+    this.authorizer.updatePolicies(policies);
+  }
+
+  /**
+   * Reload schema from configuration
+   */
+  reloadSchema(schema: string): void {
+    this.authorizer.updateSchema(schema);
+  }
+
+  /**
+   * Get the entity builder for custom entity creation
+   */
+  getEntityBuilder(): EntityBuilder {
+    return this.entityBuilder;
+  }
+}
+
+/**
+ * Create a new authorization client (async)
+ */
+export async function createClient(config: Config): Promise<CognitoAuthorizationClient> {
+  return CognitoAuthorizationClient.create(config);
+}
