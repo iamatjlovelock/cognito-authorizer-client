@@ -15,6 +15,7 @@ This document provides everything a coding agent needs to integrate the Cognito 
 | **Batch requests** missing `additionalEntities` | Error: "entity does not exist" in batch but single authorize works | Include `additionalEntities` inside EACH request object, not at top level |
 | **Attribute name mismatch** | Policy uses `Region`, but you send `region` (lowercase) | Cedar is case-sensitive - match exact attribute names from schema |
 | **Token not refreshed** after Lambda update | Old token still missing claims | User must log out and log back in to get fresh token |
+| **Translating attribute values** | Policy expects `"Y"` but app sends `"TRUE"` after translation | Pass raw data values - don't translate in the app |
 
 ---
 
@@ -850,6 +851,71 @@ When authorization fails unexpectedly, check:
    - Are policies loaded correctly? Check `avp-policies.txt` for transparency.
    - Do any policies have syntax errors?
    - Are action names exact matches (case-sensitive)?
+
+---
+
+## Critical: Don't Translate Attribute Values
+
+**Pass raw data values to the authorizer. Do NOT translate or transform them in application code.**
+
+The application's job is to pass resource attributes exactly as they are stored. The Cedar policies should be written to match the actual data format.
+
+### Why This Matters
+
+If your database stores `government: "Y"` but your code translates it:
+
+```typescript
+// WRONG - translating values in the application
+function mapContractToEntityAttrs(contract: Contract) {
+  return {
+    Government: contract.government === 'Y' ? 'TRUE' : 'FALSE',  // ❌ Don't do this!
+  };
+}
+```
+
+Now your policy must use `"TRUE"`:
+```cedar
+when { resource.Government == "TRUE" }  // Must match the translated value
+```
+
+This creates fragile coupling between app code and policies. If either changes independently, authorization breaks silently.
+
+### Correct Approach
+
+```typescript
+// CORRECT - pass raw values
+function mapContractToEntityAttrs(contract: Contract) {
+  return {
+    Government: contract.government,  // ✅ Raw value: "Y" or "N"
+  };
+}
+```
+
+Policy matches actual data:
+```cedar
+when { resource.Government == "Y" }  // Matches what's in the database
+```
+
+### Benefits
+
+1. **Single source of truth** - policies reflect actual data format
+2. **Easier debugging** - what you see in the database is what policies evaluate
+3. **Decoupled systems** - app code doesn't need to know policy logic
+4. **Display vs Authorization** - UI can show "Yes/No" for users while policies use "Y/N"
+
+### Example: Display vs Authorization
+
+```typescript
+// In your UI component - transform for DISPLAY only
+<span>{contract.government === 'Y' ? 'Yes' : 'No'}</span>
+
+// In authorization request - pass RAW value
+additionalEntities: [{
+  attrs: {
+    Government: contract.government,  // "Y" or "N" - raw value
+  }
+}]
+```
 
 ---
 
