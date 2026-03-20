@@ -1,0 +1,28 @@
+{
+  "cognito": {
+    "region": "us-east-1",
+    "userPoolId": "us-east-1_M49RbNHyh",
+    "clientId": "429dh9qd6q5sb3vl6ogqrg15ud"
+  },
+  "cedar": {
+    "namespace": "NAMESPACE",
+    "source": "avp",
+    "policyStoreId": "BWRtaygo7MkaFaBz8BbHHz",
+    "loadSchemaFromAVP": true,
+    "refreshIntervalSeconds": 120
+  },
+  "server": {
+    "port": 3000,
+    "host": "localhost"
+  },
+  "entities": {
+    "userTypeName": "User",
+    "groupTypeName": "CognitoGroup",
+    "includeCustomAttributes": true,
+    "includeProfileClaims": true,
+    "attributeMapping": {
+      "custom:user_type": "type",
+      "custom:user_region": "Region"
+    }
+  }
+}
