@@ -24,24 +24,72 @@ Before integration, ensure:
 
 ## Installation
 
-### Step 1: Clone the Repository
+### Option 1: Download Without Git (Recommended for Testing)
 
-```bash
-git clone https://github.com/iamatjlovelock/cognito-authorization-client.git
-cd cognito-authorization-client
+Use the included PowerShell script to download and run the project without cloning:
+
+```powershell
+# Create a new folder and navigate to it
+mkdir cognito-authz-test
+cd cognito-authz-test
+
+# Download and run the install script
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/iamatjlovelock/cognito-authorizer-client/main/install-and-run.ps1 -OutFile install-and-run.ps1
+.\install-and-run.ps1
 ```
 
-### Step 2: Install Dependencies
+Or to install without automatically starting:
+
+```powershell
+.\install-and-run.ps1 -SkipRun
+```
+
+### Option 2: Clone the Repository
 
 ```bash
+git clone https://github.com/iamatjlovelock/cognito-authorizer-client.git
+cd cognito-authorizer-client
 npm install
-```
-
-### Step 3: Build the Project
-
-```bash
 npm run build
 ```
+
+---
+
+## Local Testing with Test-1.ps1
+
+The repository includes a PowerShell test script (`Test-1.ps1`) that demonstrates authorization requests against various user roles. This script requires:
+
+1. **AWS CLI** configured with credentials that can authenticate against Cognito
+2. **The CAC server running** on `http://localhost:3000`
+3. **A `config.json` file** configured for your Cognito User Pool and policies
+
+### Running the Tests
+
+1. Start the CAC server in one terminal:
+   ```bash
+   npm start
+   ```
+
+2. In another terminal, run the test script:
+   ```powershell
+   .\Test-1.ps1
+   ```
+
+### What the Test Script Does
+
+The script authenticates as different test users and makes authorization requests:
+
+| User | Tests | Expected Results |
+|------|-------|------------------|
+| `intern@example.com` | REVIEW action on small vs medium contracts | Allowed for Size="S", Denied for Size="M" |
+| `inhouse-counsel@example.com` | APPROVE vs ARCHIVE actions | APPROVE allowed, ARCHIVE denied |
+| `outside-counsel@example.com` | EDIT action by region | Allowed for Region="IND", Denied for Region="US" |
+| `matt@example.com` | EDIT action by client | Allowed for Client="Netflix", Denied for Client="Robinhood" |
+| `clare@example.com` | EDIT action on government contracts | Allowed when Government="TRUE", Denied when Government="FALSE" |
+
+Each test authenticates via `aws cognito-idp initiate-auth` and sends POST requests to `/authorize` with appropriate resource attributes.
+
+---
 
 ### Step 4: Integration Method
 
