@@ -82,10 +82,22 @@ export function createHandlers(client: CognitoAuthorizationClient) {
           additionalEntities: parsed.data.additionalEntities as AuthzRequest['additionalEntities'],
         };
 
+        // Log input (excluding token for security)
+        console.log('[AUTHZ REQUEST]', JSON.stringify({
+          action: request.action,
+          resource: request.resource,
+          context: request.context,
+          additionalEntities: request.additionalEntities,
+        }));
+
         const response = await client.authorize(request);
 
         // Don't include claims in response for security
         const { claims: _claims, ...safeResponse } = response;
+
+        // Log response
+        console.log('[AUTHZ RESPONSE]', JSON.stringify(safeResponse));
+
         res.json(safeResponse);
       } catch (error) {
         console.error('Authorization error:', error);
@@ -112,6 +124,9 @@ export function createHandlers(client: CognitoAuthorizationClient) {
 
         const { token, requests } = parsed.data;
 
+        // Log batch input (excluding token for security)
+        console.log('[BATCH AUTHZ REQUEST]', JSON.stringify({ requests }));
+
         // Authorize all requests in parallel
         const responses = await Promise.all(
           requests.map((r) =>
@@ -127,14 +142,19 @@ export function createHandlers(client: CognitoAuthorizationClient) {
         // Remove claims from responses for security
         const safeResponses = responses.map(({ claims: _claims, ...rest }) => rest);
 
-        res.json({
+        const result = {
           results: safeResponses,
           summary: {
             total: safeResponses.length,
             allowed: safeResponses.filter((r) => r.allowed).length,
             denied: safeResponses.filter((r) => !r.allowed).length,
           },
-        });
+        };
+
+        // Log batch response
+        console.log('[BATCH AUTHZ RESPONSE]', JSON.stringify(result));
+
+        res.json(result);
       } catch (error) {
         console.error('Batch authorization error:', error);
         res.status(500).json({
