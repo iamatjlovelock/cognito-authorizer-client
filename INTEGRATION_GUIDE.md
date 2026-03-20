@@ -2,6 +2,22 @@
 
 This document provides everything a coding agent needs to integrate the Cognito Authorization Client (CAC) into an application. It includes technical specifications, integration patterns, and questions to ask the developer when information is ambiguous or missing.
 
+---
+
+## ⚠️ Common Integration Mistakes - Read First!
+
+**These are the most frequent errors. Check these before debugging:**
+
+| Mistake | Symptom | Solution |
+|---------|---------|----------|
+| Using **access token** instead of **ID token** | Policies checking `principal.Region` or other custom attributes always deny | Use `session.tokens?.idToken` not `accessToken` |
+| **Pre-Token Lambda** strips custom attributes | ID token missing `custom:user_region` even though it's set on user | Update Lambda to include custom attributes in `claimsToAddOrOverride` |
+| **Batch requests** missing `additionalEntities` | Error: "entity does not exist" in batch but single authorize works | Include `additionalEntities` inside EACH request object, not at top level |
+| **Attribute name mismatch** | Policy uses `Region`, but you send `region` (lowercase) | Cedar is case-sensitive - match exact attribute names from schema |
+| **Token not refreshed** after Lambda update | Old token still missing claims | User must log out and log back in to get fresh token |
+
+---
+
 ## Overview
 
 The Cognito Authorization Client is a local authorization solution that:
@@ -16,9 +32,10 @@ The Cognito Authorization Client is a local authorization solution that:
 Before integration, ensure:
 1. The target application uses Node.js/TypeScript
 2. Users authenticate via Amazon Cognito
-3. The application has access to Cognito ID or access tokens
+3. **The application can access Cognito ID tokens** (not just access tokens - see "Critical: ID Token vs Access Token" section)
 4. Cedar policies exist (either in AVP or as local files)
 5. AWS credentials are configured (for AVP integration)
+6. **If a Pre-Token Generation Lambda exists**, it passes through custom attributes (see "Critical: Pre-Token Generation Lambda Triggers" section)
 
 ---
 
@@ -373,6 +390,21 @@ Once questions are answered, create a `config.json`:
 
 ## Integration Code Patterns
 
+### Before You Start: Token Selection
+
+**Always use the ID token for authorization requests when your policies evaluate principal attributes.**
+
+```typescript
+// Getting both tokens from AWS Amplify
+const session = await fetchAuthSession();
+const accessToken = session.tokens?.accessToken?.toString(); // For API calls to your backend
+const idToken = session.tokens?.idToken?.toString();         // For CAC authorization calls
+
+// Store both if needed
+setAccessToken(accessToken);  // Use for Authorization headers to your API
+setIdToken(idToken);          // Use for CAC authorization checks
+```
+
 ### Pattern A: HTTP API Integration
 
 Start the CAC server:
@@ -383,7 +415,7 @@ npm run build
 npm run start
 ```
 
-Make authorization requests from the application:
+Make authorization requests from the application (using ID token):
 
 ```typescript
 // In your application code
@@ -619,17 +651,23 @@ const result = await authClient.authorize({
 
 ### Scenario 3: Batch Authorization
 
-**Need to check multiple resources at once (e.g., filtering a list).**
+**Need to check multiple resources or actions at once (e.g., filtering a list or checking all actions for one resource).**
+
+**IMPORTANT:** Each request in the batch must include its own `additionalEntities` if your policies evaluate resource attributes. The entities are NOT shared across requests.
 
 ```typescript
+// Check multiple actions for one contract
+const actions = ['REVIEW', 'EDIT', 'APPROVE', 'ARCHIVE'];
+
 const result = await fetch('http://localhost:3000/batch-authorize', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    token: cognitoIdToken,
-    requests: contracts.map(contract => ({
-      action: 'REVIEW',
+    token: cognitoIdToken,  // Must be ID token if policies use principal attributes!
+    requests: actions.map(action => ({
+      action: action,
       resource: { type: 'Contract', id: contract.id },
+      // CRITICAL: Each request needs its own additionalEntities
       additionalEntities: [
         {
           uid: { type: 'MyApp::Contract', id: contract.id },
@@ -637,6 +675,8 @@ const result = await fetch('http://localhost:3000/batch-authorize', {
             Region: contract.region,
             Status: contract.status,
             Size: contract.size,
+            Client: contract.client,
+            Government: contract.government === 'Y' ? 'TRUE' : 'FALSE',
           },
           parents: [],
         },
@@ -644,7 +684,136 @@ const result = await fetch('http://localhost:3000/batch-authorize', {
     })),
   }),
 });
+
+// Parse results
+const permissions = {};
+actions.forEach((action, i) => {
+  permissions[action.toLowerCase()] = result.results[i]?.allowed ?? false;
+});
 ```
+
+**Common Batch Authorization Mistake:**
+
+```typescript
+// WRONG - additionalEntities outside requests array (will be ignored)
+{
+  token: idToken,
+  additionalEntities: [...],  // ❌ This doesn't work!
+  requests: [...]
+}
+
+// CORRECT - additionalEntities inside each request
+{
+  token: idToken,
+  requests: [
+    {
+      action: 'REVIEW',
+      resource: { type: 'Contract', id: '123' },
+      additionalEntities: [...]  // ✅ Must be here
+    }
+  ]
+}
+```
+
+---
+
+## Critical: ID Token vs Access Token
+
+**THIS IS THE MOST COMMON INTEGRATION MISTAKE.**
+
+Cognito issues two types of JWT tokens. They contain DIFFERENT claims:
+
+| Claim Type | ID Token | Access Token |
+|------------|----------|--------------|
+| Custom attributes (`custom:*`) | ✅ YES | ❌ NO |
+| Cognito groups (`cognito:groups`) | ✅ YES | ✅ YES |
+| OAuth scopes (`scope`) | ❌ NO | ✅ YES |
+| User identity (`sub`, `email`, `name`) | ✅ YES | ✅ YES (limited) |
+
+### When to Use Which Token
+
+**Use the ID Token for CAC authorization when:**
+- Your Cedar policies evaluate principal attributes (e.g., `principal.Region`)
+- You have custom Cognito attributes mapped via `attributeMapping` in config
+- Your policies use `when { principal has SomeAttribute && ... }`
+
+**The Access Token will NOT work for attribute-based policies** because it doesn't contain custom attributes like `custom:user_region`.
+
+### Code Example: Using the Correct Token
+
+```typescript
+// WRONG - Access token doesn't have custom attributes
+const session = await fetchAuthSession();
+const token = session.tokens?.accessToken?.toString(); // ❌ Missing custom:user_region
+
+// CORRECT - ID token has custom attributes
+const session = await fetchAuthSession();
+const token = session.tokens?.idToken?.toString(); // ✅ Has custom:user_region
+```
+
+### How to Verify Token Contents
+
+Decode the token at jwt.io or in code:
+
+```typescript
+const payload = JSON.parse(atob(token.split('.')[1]));
+console.log('Token type:', payload.token_use); // 'id' or 'access'
+console.log('Custom region:', payload['custom:user_region']); // Only in ID token
+console.log('Groups:', payload['cognito:groups']); // In both
+```
+
+---
+
+## Critical: Pre-Token Generation Lambda Triggers
+
+If your Cognito User Pool has a **Pre Token Generation Lambda Trigger** (especially V2_0), custom attributes may be **stripped from tokens** unless explicitly passed through.
+
+### Check for Lambda Triggers
+
+```bash
+aws cognito-idp describe-user-pool \
+  --user-pool-id YOUR_POOL_ID \
+  --query 'UserPool.LambdaConfig.PreTokenGeneration'
+```
+
+### V2 Lambda Must Explicitly Include Custom Attributes
+
+With V2_0 triggers using `claimsToAddOrOverride`, you must manually include any custom attributes you need:
+
+```python
+def lambda_handler(event, context):
+    user_attributes = event.get("request", {}).get("userAttributes", {})
+
+    # CRITICAL: Include custom attributes needed for authorization
+    id_token_claims = {
+        "custom:user_type": user_attributes.get("custom:user_type", ""),
+    }
+
+    # Don't forget attributes used in Cedar policies!
+    user_region = user_attributes.get("custom:user_region")
+    if user_region:
+        id_token_claims["custom:user_region"] = user_region
+
+    event["response"] = {
+        "claimsAndScopeOverrideDetails": {
+            "idTokenGeneration": {
+                "claimsToAddOrOverride": id_token_claims,
+                "claimsToSuppress": []
+            },
+            # ... access token config
+        }
+    }
+    return event
+```
+
+### Debugging Token Claims
+
+If authorization fails with attribute-based policies:
+
+1. Get a fresh token (log out and log in)
+2. Decode and inspect the ID token payload
+3. Verify the custom attribute exists in the token
+4. Check the Lambda trigger if the attribute is missing
 
 ---
 
@@ -652,30 +821,103 @@ const result = await fetch('http://localhost:3000/batch-authorize', {
 
 When authorization fails unexpectedly, check:
 
-1. **Token Issues**
+1. **Token Type (MOST COMMON ISSUE)**
+   - Are you using the **ID token** (not access token) for authorization?
+   - Does the ID token contain the custom attributes your policies need?
+   - If using a Pre-Token Generation Lambda, does it pass through custom attributes?
+
+2. **Token Issues**
    - Is the token expired?
    - Is the token from the correct User Pool?
    - Is the audience (client ID) correct?
 
-2. **Entity Mismatch**
+3. **Entity Mismatch**
    - Does the namespace in config match the namespace in policies?
    - Are User and Group type names correct?
    - Is the principal ID (username/sub) what policies expect?
 
-3. **Missing Entities**
+4. **Missing Entities**
    - If policies reference resource attributes, are `additionalEntities` provided?
    - Do entity UIDs use the fully qualified type name (`Namespace::Type`)?
    - Are all required attributes present on entities?
 
-4. **Schema Validation Errors**
+5. **Schema Validation Errors**
    - Do entity attributes match the Cedar schema?
    - Are optional attributes accessed with `has` checks in policies?
    - Is attribute mapping creating duplicates?
 
-5. **Policy Issues**
+6. **Policy Issues**
    - Are policies loaded correctly? Check `avp-policies.txt` for transparency.
    - Do any policies have syntax errors?
    - Are action names exact matches (case-sensitive)?
+
+---
+
+## Debugging Commands
+
+### Test Authorization Directly with curl
+
+Before integrating, test the CAC directly to verify policies work:
+
+```bash
+# Get an ID token
+TOKEN=$(aws cognito-idp initiate-auth \
+  --client-id YOUR_CLIENT_ID \
+  --auth-flow USER_PASSWORD_AUTH \
+  --auth-parameters USERNAME=user@example.com,PASSWORD=YourPassword123! \
+  --region us-east-1 \
+  --query 'AuthenticationResult.IdToken' \
+  --output text)
+
+# Test single authorization
+curl -X POST http://localhost:3000/authorize \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"token\": \"$TOKEN\",
+    \"action\": \"REVIEW\",
+    \"resource\": { \"type\": \"Contract\", \"id\": \"contract-123\" },
+    \"additionalEntities\": [{
+      \"uid\": { \"type\": \"NAMESPACE::Contract\", \"id\": \"contract-123\" },
+      \"attrs\": { \"Region\": \"US\", \"Size\": \"L\", \"Client\": \"Acme\", \"Government\": \"FALSE\" },
+      \"parents\": []
+    }]
+  }"
+```
+
+### Verify Token Contains Expected Claims
+
+```bash
+# Decode and inspect token payload
+echo $TOKEN | cut -d'.' -f2 | base64 -d 2>/dev/null | jq .
+
+# Check specific claims
+echo $TOKEN | cut -d'.' -f2 | base64 -d 2>/dev/null | jq '{
+  token_use: .token_use,
+  groups: ."cognito:groups",
+  user_region: ."custom:user_region",
+  user_type: ."custom:user_type"
+}'
+```
+
+### Check for Pre-Token Lambda
+
+```bash
+aws cognito-idp describe-user-pool \
+  --user-pool-id YOUR_POOL_ID \
+  --region us-east-1 \
+  --query 'UserPool.LambdaConfig'
+```
+
+### View Lambda Code (if exists)
+
+```bash
+LAMBDA_URL=$(aws lambda get-function \
+  --function-name YOUR_LAMBDA_NAME \
+  --region us-east-1 \
+  --query 'Code.Location' \
+  --output text)
+curl -s "$LAMBDA_URL" -o lambda.zip && unzip -p lambda.zip
+```
 
 ---
 
