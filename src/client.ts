@@ -211,7 +211,7 @@ export class CognitoAuthorizationClient {
       avpPolicyStore
     );
 
-    // Start cache checking for AVP (only refreshes if policy store has been updated)
+    // Start periodic policy refresh for AVP
     if (isAVPConfig(config.cedar) && config.cedar.refreshIntervalSeconds > 0) {
       client.startCacheCheck(config.cedar.refreshIntervalSeconds);
     }
@@ -244,10 +244,10 @@ export class CognitoAuthorizationClient {
   }
 
   /**
-   * Start cache checking (periodically checks if policy store has been updated)
+   * Start periodic policy refresh from AVP
    */
   private startCacheCheck(intervalSeconds: number): void {
-    console.log(`[CACHE] Starting policy cache check every ${intervalSeconds} seconds (only refreshes if AVP policy store has changed)`);
+    console.log(`[CACHE] Starting policy refresh every ${intervalSeconds} seconds`);
     this.cacheCheckInterval = setInterval(async () => {
       try {
         await this.checkAndRefreshCache();
@@ -268,23 +268,16 @@ export class CognitoAuthorizationClient {
   }
 
   /**
-   * Check if policy store has been updated and refresh if needed
+   * Refresh the policy cache from AVP
    */
   async checkAndRefreshCache(): Promise<boolean> {
     if (!this.avpPolicyStore) {
       return false;
     }
 
-    console.log('[CACHE CHECK] Checking if policy store has been updated...');
-    const hasUpdates = await this.avpPolicyStore.hasUpdates();
-    if (hasUpdates) {
-      console.log('[CACHE CHECK] Policy store updated, refreshing policies...');
-      await this.refreshPoliciesFromAVP();
-      return true;
-    }
-
-    console.log('[CACHE CHECK] No updates detected, using cached policies');
-    return false;
+    console.log('[CACHE REFRESH] Refreshing policies from AVP...');
+    await this.refreshPoliciesFromAVP();
+    return true;
   }
 
   /**
