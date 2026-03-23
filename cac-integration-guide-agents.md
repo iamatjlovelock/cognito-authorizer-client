@@ -19,13 +19,14 @@ This document provides everything a coding agent needs to integrate the Cognito 
 | **Wrong GitHub repo URL** | 404 or SSH errors during npm install | Use `https://github.com/iamatjlovelock/cognito-authorizer-client` (not `cognito-authorization-client`) |
 | **AWS credentials wrong format** | `Unable to parse config file` error | Use INI format with `[default]` header, not environment variable format |
 | **Package not built after git install** | "Cannot find module" TypeScript errors | Run `npm run build` in the package's node_modules directory |
-| **Missing `schemaOverrideIsInline`** | TypeScript error about missing property | Add `schemaOverrideIsInline: false` to AVP cedar config |
-| **Stale local schema copy** | Integration uses wrong attribute names | Always fetch fresh schema from AVP with `aws verifiedpermissions get-schema` |
+| **Missing `schemaOverrideIsInline`** | TypeScript error about missing property | Add `schemaOverrideIsInline: false` to cedar config |
+| **Stale local schema copy** | Integration uses wrong attribute names | Always fetch fresh schema with `aws verifiedpermissions get-schema` |
 | **Renaming attributes in mapping** | `attributeMapping` transforms `user_region` to `Region` | Only strip `custom:` prefix - don't rename (e.g., `custom:user_region` → `user_region`) |
 | **Placeholder entity for list authorization** | Error: `entity "...::any" does not exist` or policy denies with wildcard attributes | Don't use placeholder entities - authorize each resource individually (see "Authorizing Resource Lists") |
 | **Schema attributes marked required but missing from token** | Authorization fails for users missing optional attributes | Mark user attributes as `"required": false` unless guaranteed present |
 | **Namespace mismatch between schema and config** | Entity types not found during authorization | Ensure `cedar.namespace` in CAC config matches schema namespace exactly |
 | **User not in memberOfTypes for CognitoGroup** | Group-based policies don't work | User entity must have `"memberOfTypes": ["CognitoGroup"]` |
+| **Schema missing CAC auto-generated attributes** | Error: `attribute 'X' should not exist according to the schema` | CAC auto-adds attributes to User and CognitoGroup entities - schema must include them (see "CAC Auto-Generated Entity Attributes") |
 
 ---
 
@@ -35,12 +36,53 @@ The Cognito Authorization Client is a local authorization solution that:
 - Validates Amazon Cognito JWT tokens (ID and access tokens)
 - Evaluates Cedar policies locally using WebAssembly
 - Maps Cognito token claims to Cedar entities automatically
-- Supports loading policies from Amazon Verified Permissions (AVP) or local files
+- Supports loading policies from Cognito Policy Stores or local files
 - Provides HTTP API endpoints and programmatic SDK access
+
+---
+
+## Integration Workflow (Three Phases)
+
+**IMPORTANT: Follow this phased approach. Do NOT jump straight to code integration.**
+
+### Phase 1: Policy Store Setup
+Create the Cognito Policy Store, upload the Cedar schema, and create sample policies for each Cognito group. This phase involves:
+- Gathering Cognito User Pool information
+- Creating or identifying the Cognito Policy Store
+- Building and uploading the Cedar schema
+- Creating group-based authorization policies
+
+### Phase 2: Developer Review (MANDATORY PAUSE)
+**STOP after Phase 1 and wait for the developer to review the policies in the AWS Console.**
+
+Tell the developer:
+```
+I've created the policy store with schema and sample policies.
+
+Policy Store ID: {POLICY_STORE_ID}
+Region: {REGION}
+
+Please review the policies in the AWS Verified Permissions console:
+https://console.aws.amazon.com/verifiedpermissions/home?region={REGION}#/policy-stores/{POLICY_STORE_ID}/policies
+
+Once you've reviewed the policies and confirmed they look correct,
+let me know and I'll proceed with the code integration.
+```
+
+**Do NOT proceed to Phase 3 until the developer confirms.**
+
+### Phase 3: Code Integration
+Only after the developer confirms the policies are correct:
+- Install the cognito-authorization-client package
+- Create the CAC client module
+- Update routes to use policy-based authorization
+- Update frontend to send ID token
+
+---
 
 ## Quick Start (Experienced Users)
 
-For those familiar with AVP and Cedar, here's the condensed setup:
+For those familiar with Cedar policies, here's the condensed setup:
 
 1. **Create policy store:**
    ```bash
@@ -79,8 +121,8 @@ Before integration, ensure:
 1. The target application uses Node.js/TypeScript
 2. Users authenticate via Amazon Cognito
 3. **The application can access Cognito ID tokens** (not just access tokens - see "Critical: ID Token vs Access Token" section)
-4. Cedar policies exist (either in AVP or as local files) - **or create a new policy store using the "Creating an AVP Policy Store from Scratch" section below**
-5. AWS credentials are configured (for AVP integration) - see "AWS Credentials Setup" below
+4. Cedar policies exist (either in a Cognito Policy Store or as local files) - **or create a new policy store using the "Setting Up the Cognito Policy Store" section below**
+5. AWS credentials are configured (for policy store access) - see "AWS Credentials Setup" below
 6. **If a Pre-Token Generation Lambda exists**, it passes through custom attributes (see "Critical: Pre-Token Generation Lambda Triggers" section)
 
 ### AWS Credentials Setup
@@ -100,82 +142,98 @@ aws_session_token = YOUR_SESSION_TOKEN
 
 ---
 
-## Creating an AVP Policy Store from Scratch
+---
 
-**Use this section when no policy store exists yet for the application.** If a policy store already exists, skip to "Pre-Integration Verification Steps".
+# Phase 1: Policy Store Setup
 
-### Step 1: Gather Required Information
+---
+
+## Setting Up the Cognito Policy Store
+
+### Step 1: Get Cognito User Pool ID
 
 Ask the developer:
 
 ```
-Q1: What is your Cognito User Pool ID?
-    Format: {region}_{poolId} (e.g., us-east-1_ABC123xyz)
-
-Q2: What AWS region should the policy store be created in?
-    (Should match your Cognito User Pool region)
-
-Q3: What is the name of your application?
-    (Used for the policy store description)
-
-    IMPORTANT: This is the business application whose resources will be protected
-    by authorization policies (e.g., "Contract Management System", "Document Portal").
-    This is NOT the name of admin tools or policy management UIs that configure policies.
-
-Q4: What Cedar namespace should be used?
-    Example: MyApp, TaskManager, NAMESPACE
-    This appears in policy statements like: MyApp::User, MyApp::Action::"VIEW"
+What is your Cognito User Pool ID?
+Format: {region}_{poolId} (e.g., us-east-1_ABC123xyz)
 ```
 
-### Step 2: Check for Existing Policy Store
+### Step 2: Check for Existing Cognito Policy Stores
 
-List policy stores and look for one matching your User Pool in the description:
+**Automatically check** for existing policy stores that reference this User Pool. Search the descriptions for the User Pool ID:
 
 ```bash
 aws verifiedpermissions list-policy-stores \
-  --region us-east-1 \
-  --query 'policyStores[*].[policyStoreId,description]' \
-  --output table
+  --region REGION \
+  --output json
 ```
 
-**If a matching policy store exists**, ask the developer:
+Parse the results and filter for policy stores where the `description` contains the User Pool ID.
+
+**If matching policy stores are found**, present them to the developer:
 
 ```
-A policy store already exists that appears to match your User Pool:
-Policy Store ID: {EXISTING_POLICY_STORE_ID}
-Description: {DESCRIPTION}
+I found existing Cognito Policy Store(s) for your User Pool:
 
-Do you want to:
-a) Use the existing policy store (skip creation)
-b) Delete the existing policy store and create a new one
+1. {POLICY_STORE_ID_1} - "{DESCRIPTION_1}"
+2. {POLICY_STORE_ID_2} - "{DESCRIPTION_2}"
 
-WARNING: Option (b) will permanently delete all existing policies in that store.
+Would you like to:
+a) Use an existing policy store (select which one)
+b) Delete the existing store(s) and create a fresh one
+
+WARNING: Option (b) will permanently delete all existing policies.
 ```
 
-If the developer chooses (b), delete the existing policy store:
+**If the developer chooses to use an existing store:**
+- Record the selected policy store ID
+- Skip to Phase 3 (Code Integration)
+
+**If the developer chooses to delete and create new:**
+Delete each matching policy store:
 
 ```bash
 aws verifiedpermissions delete-policy-store \
-  --policy-store-id EXISTING_POLICY_STORE_ID \
-  --region us-east-1
+  --policy-store-id POLICY_STORE_ID \
+  --region REGION
 ```
 
-### Step 3: Create the Policy Store
+Then proceed to Step 3.
 
-Create a new policy store. Include the User Pool ID in the description for easy identification:
+**If no matching policy stores are found**, proceed directly to Step 3.
+
+### Step 3: Gather Additional Information
+
+Ask the developer:
+
+```
+Q1: What is the name of your application?
+    (e.g., "Contract Management System", "Document Portal")
+
+    IMPORTANT: This is the business application whose resources will be protected
+    by authorization policies. This is NOT the name of admin tools or policy
+    management UIs that configure policies.
+
+Q2: What Cedar namespace should be used?
+    Example: MyApp, TaskManager, ContractMgt
+    This appears in policy statements like: MyApp::User, MyApp::Action::"VIEW"
+```
+
+### Step 4: Create the Cognito Policy Store
+
+Create a new policy store. **Always include the User Pool ID in the description** - this allows future lookups to find the correct store:
 
 ```bash
 aws verifiedpermissions create-policy-store \
   --validation-settings "mode=STRICT" \
-  --description "Policy store for APPLICATION_NAME (Cognito User Pool: USER_POOL_ID)" \
-  --region us-east-1
+  --description "Cognito Policy Store for APPLICATION_NAME (Cognito User Pool: USER_POOL_ID)" \
+  --region REGION
 ```
 
 Save the returned `policyStoreId` - you'll need it for subsequent commands.
 
-**Note:** Including the User Pool ID in the description makes it easy to find the policy store later. The `tag-resource` API may not be available in all CLI versions.
-
-### Step 4: Retrieve Cognito User Pool Schema Information
+### Step 5: Retrieve Cognito User Pool Schema Information
 
 Fetch the user pool configuration to understand available attributes:
 
@@ -202,13 +260,13 @@ aws cognito-idp describe-user-pool-client \
 - Which attributes are required vs optional
 - Attribute data types (String, Number, etc.)
 
-### Step 5: Build the Cedar Schema
+### Step 6: Build the Cedar Schema
 
 The Cedar schema defines entity types, their attributes, and actions. Build it incrementally:
 
-#### 5a: Define the CognitoGroup Entity Type
+#### 6a: Define the CognitoGroup Entity Type
 
-This entity represents Cognito user groups. It typically has no attributes of its own:
+This entity represents Cognito user groups. **IMPORTANT:** The CAC automatically adds a `name` attribute to CognitoGroup entities, so the schema must include it:
 
 ```json
 {
@@ -217,7 +275,9 @@ This entity represents Cognito user groups. It typically has no attributes of it
       "CognitoGroup": {
         "shape": {
           "type": "Record",
-          "attributes": {}
+          "attributes": {
+            "name": { "type": "String", "required": false }
+          }
         }
       }
     }
@@ -225,9 +285,27 @@ This entity represents Cognito user groups. It typically has no attributes of it
 }
 ```
 
-#### 5b: Define the User Entity Type
+> **Warning:** If you define CognitoGroup with empty attributes `{}`, authorization will fail with error: `attribute 'name' on 'NAMESPACE::CognitoGroup::"group-name"' should not exist according to the schema`
 
-First, fetch the custom attributes defined in the Cognito User Pool:
+#### 6b: Define the User Entity Type
+
+**IMPORTANT: CAC Auto-Generated Attributes**
+
+The CAC automatically adds several attributes to User entities from the ID token. Your schema **must include all of these** or authorization will fail with `attribute 'X' should not exist according to the schema`.
+
+**CAC auto-generated User attributes (always include these):**
+
+| Attribute | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sub` | String | Yes | Cognito user subject ID |
+| `username` | String | No | Cognito username |
+| `email` | String | No | User email address |
+| `email_verified` | Boolean | No | Whether email is verified |
+| `name` | String | No | User display name |
+| `scopes` | String | No | OAuth scopes (space-separated) |
+| `groups` | Set of Strings | No | Cognito groups the user belongs to |
+
+**Additionally, fetch custom attributes** defined in the Cognito User Pool:
 
 ```bash
 aws cognito-idp describe-user-pool \
@@ -237,22 +315,19 @@ aws cognito-idp describe-user-pool \
   --output table
 ```
 
-Map Cognito user attributes to Cedar User entity attributes. **Remove the `custom:` prefix** from custom attributes:
+Map custom attributes by **removing the `custom:` prefix**:
 
 | Cognito Attribute | Cedar Attribute | Type | Required |
 |-------------------|-----------------|------|----------|
-| `sub` | `sub` | String | Yes |
-| `email` | `email` | String | Based on app client |
-| `cognito:groups` | (handled via parents) | - | - |
-| `custom:user_type` | `user_type` | String | Based on app client |
-| `custom:user_region` | `user_region` | String | Based on app client |
+| `custom:user_type` | `user_type` | String | No |
+| `custom:user_region` | `user_region` | String | No |
 
 **Determining Required vs Optional:**
-- Check the app client's `ReadAttributes` and `WriteAttributes`
-- If an attribute is in `WriteAttributes` but not marked as required in the user pool schema, make it optional in Cedar
-- When in doubt, make attributes optional (use `"required": false`) to avoid authorization failures
+- Mark CAC auto-generated attributes as `"required": false` (they may not always be present)
+- Check the app client's `ReadAttributes` for custom attributes
+- When in doubt, make attributes optional to avoid authorization failures
 
-Example User entity:
+**Complete User entity example (with CAC auto-generated attributes):**
 
 ```json
 "User": {
@@ -261,7 +336,12 @@ Example User entity:
     "type": "Record",
     "attributes": {
       "sub": { "type": "String" },
-      "email": { "type": "String" },
+      "username": { "type": "String", "required": false },
+      "email": { "type": "String", "required": false },
+      "email_verified": { "type": "Boolean", "required": false },
+      "name": { "type": "String", "required": false },
+      "scopes": { "type": "String", "required": false },
+      "groups": { "type": "Set", "element": { "type": "String" }, "required": false },
       "user_type": { "type": "String", "required": false },
       "user_region": { "type": "String", "required": false }
     }
@@ -269,7 +349,9 @@ Example User entity:
 }
 ```
 
-#### 5c: Ask About Resource Types
+> **Warning:** If you omit CAC auto-generated attributes from the schema, authorization will fail even if your policies don't use those attributes. The Cedar validator checks all entity attributes against the schema.
+
+#### 6c: Ask About Resource Types
 
 > **Note:** This guide uses "Document" as an example resource type. Replace with your actual resource type (e.g., "Contract", "Report", "Order", "Task").
 
@@ -305,15 +387,46 @@ Based on scanning the application code, I found these potential resource types:
 2. Report (found in: src/models/report.ts)
    - Attributes: id, type, author, department
 
-Please confirm which resource types should be included in the authorization schema,
-and which attributes should be available for policy conditions.
-
-NOTE: Properties you include will appear in dropdown lists in the Amazon Verified
-Permissions console when creating attribute-based policies. Only include attributes
-that are relevant for authorization decisions.
+Please confirm which resource types should be included in the authorization schema.
 ```
 
-#### 5d: Define Resource Entity Types
+**After the developer confirms the resource types, present the detailed attribute list for validation:**
+
+```
+For the resource type(s) you confirmed, here are the attributes I plan to include in the schema:
+
+Document:
+┌─────────────────┬─────────┬──────────┬─────────────────────────────────────┐
+│ Attribute       │ Type    │ Required │ Source                              │
+├─────────────────┼─────────┼──────────┼─────────────────────────────────────┤
+│ department      │ String  │ Yes      │ document.department                 │
+│ classification  │ String  │ Yes      │ document.classification             │
+│ owner           │ String  │ Yes      │ document.owner                      │
+│ status          │ String  │ Yes      │ document.status                     │
+└─────────────────┴─────────┴──────────┴─────────────────────────────────────┘
+
+NOTE: These attributes will appear in dropdown lists in the Amazon Verified
+Permissions console when creating attribute-based policies. Only include
+attributes that are relevant for authorization decisions.
+
+Please review and confirm:
+1. Are these the correct attributes for authorization decisions?
+2. Should any attributes be added or removed?
+3. Are the data types correct (String, Long, Boolean)?
+4. Should any attributes be marked as optional (required: false)?
+
+Reply "confirmed" to proceed, or provide corrections.
+```
+
+**⚠️ WAIT for the developer to confirm the attribute list before proceeding to step 6d.**
+
+This validation is important because:
+- Attribute names in the schema must match exactly what the application provides
+- Missing attributes cannot be used in policy conditions
+- Extra attributes clutter the policy authoring experience
+- Incorrect types cause authorization failures
+
+#### 6d: Define Resource Entity Types
 
 For each confirmed resource type, create an entity definition:
 
@@ -336,7 +449,7 @@ For each confirmed resource type, create an entity definition:
 - Only include attributes that are relevant for authorization decisions
 - Attribute names are case-sensitive and must match exactly what the application provides in `additionalEntities`
 
-#### 5e: Define Actions
+#### 6e: Define Actions
 
 Scan the application code to identify candidate actions:
 - Look for route handlers (GET, POST, PUT, DELETE patterns)
@@ -406,9 +519,9 @@ Define actions in the schema:
 }
 ```
 
-### Step 6: Assemble the Complete Schema
+### Step 7: Assemble the Complete Schema
 
-Combine all entity types and actions into the complete schema:
+Combine all entity types and actions into the complete schema. **Remember to include all CAC auto-generated attributes:**
 
 ```json
 {
@@ -417,7 +530,9 @@ Combine all entity types and actions into the complete schema:
       "CognitoGroup": {
         "shape": {
           "type": "Record",
-          "attributes": {}
+          "attributes": {
+            "name": { "type": "String", "required": false }
+          }
         }
       },
       "User": {
@@ -426,7 +541,12 @@ Combine all entity types and actions into the complete schema:
           "type": "Record",
           "attributes": {
             "sub": { "type": "String" },
-            "email": { "type": "String" },
+            "username": { "type": "String", "required": false },
+            "email": { "type": "String", "required": false },
+            "email_verified": { "type": "Boolean", "required": false },
+            "name": { "type": "String", "required": false },
+            "scopes": { "type": "String", "required": false },
+            "groups": { "type": "Set", "element": { "type": "String" }, "required": false },
             "user_type": { "type": "String", "required": false },
             "user_region": { "type": "String", "required": false }
           }
@@ -476,7 +596,7 @@ Combine all entity types and actions into the complete schema:
 
 **Replace `NAMESPACE` with the actual namespace confirmed by the developer.**
 
-### Step 7: Upload the Schema to AVP
+### Step 8: Upload the Schema
 
 Save the schema to a `cedar-schema.json` file, then create a definition file and upload it.
 
@@ -491,7 +611,7 @@ console.log('Schema definition created');
 "
 ```
 
-**Upload to AVP:**
+**Upload to policy store:**
 
 ```bash
 aws verifiedpermissions put-schema \
@@ -505,7 +625,7 @@ aws verifiedpermissions put-schema \
 > echo "{\"cedarJson\": $(cat cedar-schema.json | jq -c '.' | jq -Rs '.')}" > schema-definition.json
 > ```
 
-### Step 8: Verify the Schema
+### Step 9: Verify the Schema
 
 Confirm the schema was uploaded correctly:
 
@@ -529,11 +649,11 @@ aws verifiedpermissions get-schema --policy-store-id POLICY_STORE_ID --region us
   --query 'schema' --output text | jq '.'
 ```
 
-### Step 9: Create Sample Authorization Policies
+### Step 10: Create Sample Authorization Policies
 
 After the schema is uploaded, help the developer create sample authorization policies. This demonstrates how policies work and provides a starting point for their authorization logic.
 
-#### 9a: Check for Cognito User Pool Groups
+#### 10a: Check for Cognito User Pool Groups
 
 First, check if the Cognito User Pool has any groups defined:
 
@@ -562,7 +682,7 @@ Which group would you like to create a policy for?
 
 **If no groups exist**, skip to section 9d for attribute-based policies only.
 
-#### 9b: Create Group-Based Policy (Membership Permissions Pattern)
+#### 10b: Create Group-Based Policy (Membership Permissions Pattern)
 
 The Membership permissions pattern derives access rights from a principal's inclusion in a group. This is the Cedar equivalent of Role-Based Access Control (RBAC).
 
@@ -601,7 +721,7 @@ permit (
 );
 ```
 
-#### 9c: Add Attribute-Based Conditions to Group Policy
+#### 10c: Add Attribute-Based Conditions to Group Policy
 
 After defining the basic group policy, prompt the developer to add attribute-based conditions. This combines RBAC with Attribute-Based Access Control (ABAC).
 
@@ -663,7 +783,7 @@ permit (
 };
 ```
 
-#### 9d: Create the Policy in AVP
+#### 10d: Create the Policy in the Policy Store
 
 Once the developer confirms the policy, create it in the policy store:
 
@@ -730,7 +850,7 @@ aws verifiedpermissions create-policy \
   --region us-east-1
 ```
 
-#### 9e: Verify the Policy Was Created
+#### 10e: Verify the Policy Was Created
 
 ```bash
 # List policies in the store
@@ -741,7 +861,7 @@ aws verifiedpermissions list-policies \
   --output table
 ```
 
-#### 9f: Offer to Create Additional Policies
+#### 10f: Offer to Create Additional Policies
 
 After creating the first policy, ask the developer:
 
@@ -851,22 +971,85 @@ policies.forEach(p => {
 
 Run with: `node create-policies.js`
 
+---
+
+# Phase 2: Developer Review Checkpoint
+
+---
+
+## STOP - Wait for Developer Confirmation
+
+**After completing Phase 1, you MUST pause and wait for the developer to review the policies.**
+
+### What to Tell the Developer
+
+Present the following information:
+
+```
+Phase 1 Complete: Policy Store Setup
+
+I've created the Cognito Policy Store with the Cedar schema and sample policies.
+
+Summary:
+- Policy Store ID: {POLICY_STORE_ID}
+- Region: {REGION}
+- Namespace: {NAMESPACE}
+- Policies created: {LIST_OF_POLICY_NAMES}
+
+Please review the policies in the AWS Verified Permissions console:
+https://console.aws.amazon.com/verifiedpermissions/home?region={REGION}#/policy-stores/{POLICY_STORE_ID}/policies
+
+Things to verify:
+1. The schema entity types and attributes are correct
+2. Each group has appropriate permissions
+3. Any attribute-based conditions are accurate
+
+You can:
+- Edit policies directly in the console
+- Add new policies
+- Modify attribute conditions
+- Test policies using the "Test bench" feature
+
+Once you've reviewed and confirmed the policies are correct,
+reply "proceed" and I'll continue with the code integration (Phase 3).
+```
+
+### Why This Pause is Important
+
+1. **Policy review is a human decision** - Authorization policies define who can do what. The developer (or security team) must verify these are correct before they're enforced in the application.
+
+2. **Easier to fix now** - Changing policies in the console is much easier than debugging why authorization is failing in the running application.
+
+3. **Test bench validation** - The policy management console has a "Test bench" feature that lets developers test authorization decisions before any code is written.
+
+4. **Prevents wasted work** - If policies need changes, it's better to discover this before writing integration code.
+
+### Do NOT Proceed Until
+
+The developer explicitly confirms:
+- They have reviewed the policies in the AWS console
+- The policies are correct (or they've made necessary changes)
+- They want to proceed with code integration
+
+**Only after receiving confirmation, continue to Phase 3.**
+
+---
+
 ### Summary: Questions to Ask When Creating Policy Store
 
 | Step | Question |
 |------|----------|
 | 1 | What is your Cognito User Pool ID? |
-| 1 | What AWS region? |
-| 1 | What is the application name? |
-| 1 | What Cedar namespace? |
-| 2 | (If exists) Delete existing policy store or use it? |
-| 5c | What resource types does the application manage? |
-| 5c | Which resource attributes should be usable in policies? |
-| 5e | Which actions should be defined for each resource? |
-| 9a | Which Cognito group should have a policy? |
-| 9b | Which actions should the group be permitted to perform? |
-| 9c | Should access be restricted by a resource attribute condition? |
-| 9f | Would you like to create additional policies? |
+| 2 | (Auto-check: If existing stores found) Use existing store or delete and create new? |
+| 3 | What is the application name? |
+| 3 | What Cedar namespace? |
+| 6c | What resource types does the application manage? |
+| 6c | **⚠️ VALIDATION: Confirm resource attribute list before proceeding** |
+| 6e | Which actions should be defined for each resource? |
+| 10a | Which Cognito group should have a policy? |
+| 10b | Which actions should the group be permitted to perform? |
+| 10c | Should access be restricted by a resource attribute condition? |
+| 10f | Would you like to create additional policies? |
 
 ### Cedar Schema Reference
 
@@ -912,16 +1095,22 @@ Run with: `node create-policies.js`
 
 ---
 
+# Phase 3: Code Integration
+
+---
+
+**Only proceed to this phase after the developer has confirmed they've reviewed and approved the policies in Phase 2.**
+
 ## Pre-Integration Verification Steps
 
 **IMPORTANT: Always perform these verification steps before writing integration code.**
 
-### Step 1: Fetch the Latest Schema from AVP
+### Step 1: Fetch the Latest Schema from the Policy Store
 
-**Never rely on local schema copies - always fetch fresh from AVP:**
+**Never rely on local schema copies - always fetch fresh from the policy store:**
 
 ```bash
-# Fetch schema from AVP policy store
+# Fetch schema from the Cognito Policy Store
 aws verifiedpermissions get-schema \
   --policy-store-id YOUR_POLICY_STORE_ID \
   --region us-east-1 \
@@ -987,7 +1176,7 @@ event["response"] = {
 
 Create a correlation table to verify alignment:
 
-| Source | Attribute Name | AVP Schema Attribute | Notes |
+| Source | Attribute Name | Schema Attribute | Notes |
 |--------|---------------|---------------------|-------|
 | ID Token | `custom:user_type` | `user_type` | Strip `custom:` prefix |
 | ID Token | `custom:user_region` | `user_region` | Strip `custom:` prefix |
@@ -1129,7 +1318,7 @@ const result = await client.authorize(request: AuthzRequest): Promise<AuthzRespo
 // Validate token without authorization
 const validatedToken = await client.validateToken(token: string): Promise<ValidatedToken>;
 
-// Manually refresh policies from AVP
+// Manually refresh policies from the policy store
 await client.refreshPoliciesFromAVP(): Promise<void>;
 
 // Get entity builder for custom entities
@@ -1264,9 +1453,9 @@ Then use stricter policies for modification actions (EDIT, DELETE).
 
 ## Configuration
 
-### AVP Configuration (TypeScript-safe)
+### Policy Store Configuration (TypeScript-safe)
 
-When using AVP with TypeScript, you **must** include `schemaOverrideIsInline` even though it has a default value:
+When using a policy store with TypeScript, you **must** include `schemaOverrideIsInline` even though it has a default value:
 
 ```typescript
 const config = {
@@ -1358,7 +1547,7 @@ export async function initializeCACClient(): Promise<void> {
     cedar: {
       namespace: NAMESPACE,
       source: 'avp' as const,
-      policyStoreId: process.env.AVP_POLICY_STORE_ID!,
+      policyStoreId: process.env.POLICY_STORE_ID!,
       loadSchemaFromAVP: true,
       schemaOverrideIsInline: false,  // Required for TypeScript
       refreshIntervalSeconds: 120,
@@ -1538,52 +1727,55 @@ const getAuthHeaders = (): Record<string, string> => {
 
 ## Questions to Ask the Developer
 
-### 1. Cognito Configuration
+### Initial Question (Before Starting)
 
 ```
 Q1: What is your Cognito User Pool ID?
     Format: {region}_{poolId} (e.g., us-east-1_ABC123xyz)
-
-Q2: What is your Cognito App Client ID?
-    Format: alphanumeric string (e.g., 1abc2defg3hijklmno4pqrs5t)
-
-Q3: What AWS region is your Cognito User Pool in?
-    Format: e.g., us-east-1, eu-west-1
 ```
 
-### 2. Policy Source
+**After getting the User Pool ID, automatically check for existing Cognito Policy Stores:**
 
-```
-Q4: Where are your Cedar policies stored?
-    Options:
-    a) Amazon Verified Permissions (AVP) - recommended for production
-    b) Local files - suitable for development/testing
-    c) No policy store exists yet - need to create one
-
-If AVP (option a):
-    Q4a: What is your AVP Policy Store ID?
-         Format: alphanumeric string (e.g., BWRtaygo7MkaFaBz8BbHHz)
-
-If Local files (option b):
-    Q4b: What is the path to your Cedar policies file?
-
-If No policy store (option c):
-    → Follow the "Creating an AVP Policy Store from Scratch" section above
-    → This will guide you through creating the policy store and Cedar schema
+```bash
+aws verifiedpermissions list-policy-stores --region REGION --output json
 ```
 
-### 3. Cedar Namespace
+Filter results for policy stores where `description` contains the User Pool ID.
+
+**If existing stores are found:**
+```
+I found existing Cognito Policy Store(s) for your User Pool:
+
+1. {POLICY_STORE_ID} - "{DESCRIPTION}"
+
+Would you like to:
+a) Use the existing store (skip to Phase 3)
+b) Delete the existing store(s) and create a fresh one
+```
+
+**If no existing stores are found, or developer chooses to create new:**
+Continue with Phase 1 Questions below.
+
+### Phase 1 Questions (Policy Store Setup)
 
 ```
-Q5: What Cedar namespace do your policies use?
-    Example: MyApp, DocManager, NAMESPACE
+Q2: What is the name of your application?
+    (Used for the policy store description)
+
+Q3: What Cedar namespace should be used?
+    Example: MyApp, ContractMgt, NAMESPACE
     This appears in policy statements like: MyApp::User, MyApp::Action::"VIEW"
 ```
 
-### 4. Integration Pattern
+### Phase 3 Questions (Code Integration)
+
+These questions are asked AFTER the developer has reviewed and approved policies in Phase 2:
 
 ```
-Q6: How do you want to integrate the CAC?
+Q6: What is your Cognito App Client ID?
+    Format: alphanumeric string (e.g., 1abc2defg3hijklmno4pqrs5t)
+
+Q7: How do you want to integrate the CAC?
     Options:
     a) SDK - Import directly into the application (recommended, simpler)
     b) HTTP API - Run as a separate service
@@ -1675,8 +1867,8 @@ Before integrating with the authorization client, verify the following:
    - Verify it includes custom attributes in `claimsToAddOrOverride`
    - The Lambda may add, modify, or filter attributes before they appear in the token
 
-3. **Verify AVP Policy Store Schema matches ID Token attributes**
-   - **Always fetch the latest schema from AVP** (see Pre-Integration Verification Steps)
+3. **Verify Policy Store Schema matches ID Token attributes**
+   - **Always fetch the latest schema from the policy store** (see Pre-Integration Verification Steps)
    - Check the **User entity** has attributes defined that correspond to ID token claims
    - Attribute names must match exactly (after stripping `custom:` prefix)
    - **If they do not correlate, ask for clarification on the correct mapping**
@@ -1694,12 +1886,12 @@ ID Token claims:
   - custom:user_region: "US"
   - email: "user@example.com"
 
-AVP Schema (User entity attributes):
+Policy Store Schema (User entity attributes):
   - user_type: String       ✅ Matches (after stripping custom:)
   - user_region: String     ✅ Matches (after stripping custom:)
   - email: String           ✅ Matches
 
-AVP Schema (Document entity attributes):
+Policy Store Schema (Document entity attributes):
   - department: String      (different from user_region - this is OK)
   - classification: String
   - status: String
@@ -1720,7 +1912,7 @@ Authorization Request:
 | Schema uses `Region` for User but token has `custom:user_region` | Policy evaluations fail silently | Schema should use `user_region` for User entity |
 | Pre-token Lambda filters out attributes | Token missing expected claims | Update Lambda to pass through required attributes |
 | Schema attribute is `userType` but token has `custom:user_type` | Attribute not found in authorization | Update schema to use `user_type` (matching token) |
-| Local schema copy is stale | Integration uses wrong attribute names | Always fetch fresh schema from AVP before integration |
+| Local schema copy is stale | Integration uses wrong attribute names | Always fetch fresh schema from the policy store before integration |
 
 ---
 
@@ -1736,7 +1928,7 @@ npm run build
 
 ### TypeScript error: "Property 'schemaOverrideIsInline' is missing"
 
-Add it to your AVP config even though it has a default:
+Add it to your policy store config even though it has a default:
 ```typescript
 cedar: {
   source: 'avp' as const,
@@ -1751,6 +1943,47 @@ cedar: {
 2. Verify custom attributes exist in the token (decode at jwt.io)
 3. Check attribute names are case-sensitive matches
 4. Ensure `additionalEntities` includes the resource with correct attributes
+
+### Error: "attribute 'X' should not exist according to the schema"
+
+This error means the CAC is sending attributes that aren't defined in your Cedar schema. The CAC automatically adds attributes to User and CognitoGroup entities.
+
+**Solution:** Update your schema to include all CAC auto-generated attributes:
+
+```json
+"CognitoGroup": {
+  "shape": {
+    "type": "Record",
+    "attributes": {
+      "name": { "type": "String", "required": false }
+    }
+  }
+},
+"User": {
+  "memberOfTypes": ["CognitoGroup"],
+  "shape": {
+    "type": "Record",
+    "attributes": {
+      "sub": { "type": "String" },
+      "username": { "type": "String", "required": false },
+      "email": { "type": "String", "required": false },
+      "email_verified": { "type": "Boolean", "required": false },
+      "name": { "type": "String", "required": false },
+      "scopes": { "type": "String", "required": false },
+      "groups": { "type": "Set", "element": { "type": "String" }, "required": false },
+      // ... plus your custom attributes (user_type, user_region, etc.)
+    }
+  }
+}
+```
+
+After updating the schema JSON file, re-upload to the policy store:
+```bash
+node -e "const fs=require('fs'); const s=JSON.parse(fs.readFileSync('cedar-schema.json','utf8')); fs.writeFileSync('schema-definition.json',JSON.stringify({cedarJson:JSON.stringify(s)}));"
+aws verifiedpermissions put-schema --policy-store-id POLICY_STORE_ID --definition file://schema-definition.json --region us-east-1
+```
+
+Then restart your backend server to pick up the updated schema.
 
 ### "entity does not exist" error
 
@@ -1777,7 +2010,7 @@ await client.authorize({
 | `/authorize` | POST | Single authorization request |
 | `/batch-authorize` | POST | Multiple authorization requests |
 | `/validate-token` | POST | Validate token without authorization |
-| `/refresh-policies` | POST | Force reload policies from AVP |
+| `/refresh-policies` | POST | Force reload policies from policy store |
 | `/health` | GET | Health check |
 
 ---
@@ -1789,10 +2022,81 @@ await client.authorize({
 AWS_REGION=us-east-1
 USER_POOL_ID=us-east-1_ABC123xyz
 USER_POOL_CLIENT_ID=1abc2defg3hijklmno4pqrs5t
-AVP_POLICY_STORE_ID=BWRtaygo7MkaFaBz8BbHHz
+POLICY_STORE_ID=BWRtaygo7MkaFaBz8BbHHz
 
-# For AWS SDK (AVP access)
+# For AWS SDK (policy store access)
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 # Or use IAM role/instance profile
 ```
+
+---
+
+## Integration Workflow Summary
+
+**Always follow this sequence. Do not skip phases.**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PHASE 1: Policy Store Setup                                    │
+│                                                                 │
+│  1. Ask initial questions (User Pool ID, region, namespace)     │
+│  2. Check for existing policy store                             │
+│  3. Create policy store (if needed)                             │
+│  4. Fetch Cognito custom attributes and groups                  │
+│  5. Build and upload Cedar schema                               │
+│  6. Create sample policies for each Cognito group               │
+│  7. Verify policies were created                                │
+│                                                                 │
+│  Output: Policy Store ID, list of created policies              │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  PHASE 2: Developer Review (MANDATORY PAUSE)                    │
+│                                                                 │
+│  ⚠️  STOP HERE AND WAIT FOR DEVELOPER CONFIRMATION              │
+│                                                                 │
+│  Tell the developer:                                            │
+│  - Policy Store ID and console URL                              │
+│  - List of policies created                                     │
+│  - Ask them to review in the AWS console                        │
+│  - Wait for explicit "proceed" confirmation                     │
+│                                                                 │
+│  DO NOT continue until developer confirms!                      │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  PHASE 3: Code Integration                                      │
+│                                                                 │
+│  Only after developer confirmation:                             │
+│                                                                 │
+│  1. Install cognito-authorization-client package                │
+│  2. Create CAC client module (cac-client.ts)                    │
+│  3. Update routes to use CAC authorization                      │
+│  4. Update frontend to send ID token (X-Id-Token header)        │
+│  5. Update server startup to initialize CAC                     │
+│  6. Add POLICY_STORE_ID to environment variables                │
+│  7. Test the integration                                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Quick Reference: Phase Transitions
+
+| From | To | Trigger |
+|------|-----|---------|
+| Start | Phase 1 | User requests CAC integration |
+| Phase 1 | Phase 2 | All policies created successfully |
+| Phase 2 | Phase 3 | Developer says "proceed" or similar confirmation |
+| Phase 3 | Done | Code integration complete and tested |
+
+### What NOT to Do
+
+- ❌ Skip Phase 1 and jump to code integration
+- ❌ Skip Phase 2 (developer review)
+- ❌ Assume policies are correct without developer review
+- ❌ Continue to Phase 3 without explicit confirmation
+- ❌ Create policies without first understanding Cognito groups
+- ❌ Write integration code before schema/policies exist in the policy store
+- ❌ Create the schema without confirming resource attributes with the developer
