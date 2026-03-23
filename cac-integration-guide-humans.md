@@ -53,6 +53,99 @@ Compare the User entity attributes in the schema with your ID token claims. The 
 
 ---
 
+## Creating a Policy Store with a Coding Agent
+
+If you don't have an AVP policy store yet, a coding agent can help you create one from scratch. Here's what to expect during that process:
+
+### What the Agent Will Do
+
+1. **Gather information** — The agent will ask for your Cognito User Pool ID, AWS region, application name, and desired Cedar namespace.
+
+2. **Check for existing policy stores** — It will look for any policy store already associated with your user pool to avoid duplicates.
+
+3. **Create the policy store** — A new AVP policy store will be created and tagged with your Cognito User Pool ID for easy identification.
+
+4. **Build the Cedar schema** — The agent will:
+   - Retrieve your Cognito user attributes
+   - Scan your application code to identify resource types (e.g., Document, Report)
+   - Ask you to confirm which resource properties should be available for policy conditions
+   - Define actions based on your API routes and business operations
+
+5. **Upload and verify the schema** — The schema is uploaded to AVP and validated.
+
+6. **Create sample authorization policies** — The agent walks you through creating initial policies to demonstrate how authorization works.
+
+### Sample Policy Creation Process
+
+After the schema is set up, the agent helps you create sample policies:
+
+1. **Group-based policies** — If your Cognito User Pool has groups defined (e.g., "Admins", "Reviewers", "ReadOnly"), the agent will ask if you want to create a policy for one of them. This uses the **Membership permissions** Cedar pattern—access is granted based on group membership.
+
+2. **Attribute-based conditions** — The agent will show you the resource attributes from your schema and ask if you want to add conditions. For example: "Should Reviewers only be able to view documents with status 'Draft' or 'Review'?"
+
+3. **Policy generation** — Based on your answers, the agent converts your requirements into Cedar policy syntax and creates the policy in AVP.
+
+4. **Additional policies** — You can create more policies for other groups, owner-based access, or admin full access.
+
+### Example Interaction
+
+```
+Agent: I found these groups in your Cognito User Pool:
+       1. Admins
+       2. Reviewers
+       3. ReadOnly
+
+       Which group would you like to create a policy for?
+
+You:   Reviewers
+
+Agent: Which actions should Reviewers be permitted to perform?
+       Available: VIEW, EDIT, DELETE, CREATE
+
+You:   VIEW and EDIT
+
+Agent: Your Document resource has these attributes: department, status, owner.
+       Should Reviewers only access documents with certain attribute values?
+       Example: "status equals Draft"
+
+You:   status equals Draft or Review
+
+Agent: Creating policy:
+       "Reviewers can VIEW and EDIT documents with status Draft or Review"
+
+       [Policy created successfully]
+```
+
+---
+
+## Managing Policies in the AWS Console
+
+Once your policy store is created, you don't need a coding agent to maintain policies. You can manage authorization policies directly in the AWS Console:
+
+1. **Navigate to Amazon Verified Permissions** in the AWS Console
+2. **Select your policy store** (tagged with your Cognito User Pool ID)
+3. **Create and edit policies** using the visual policy editor or Cedar syntax
+
+### Group-Based Policies in the Console
+
+The console makes it easy to create policies for Cognito groups:
+
+1. Click **Create policy**
+2. Select **Static policy** and choose **Permit**
+3. For **Principal scope**, select "Specific principal" and choose your group (e.g., `CognitoGroup::"Reviewers"`)
+4. For **Action scope**, select the actions to permit
+5. For **Resource scope**, select your resource type
+6. Optionally add **Conditions** using resource attributes from your schema
+
+This visual approach is ideal for:
+- Business administrators who need to adjust permissions without code changes
+- Quick policy updates that don't require a development cycle
+- Experimenting with different authorization rules
+
+The CAC automatically picks up policy changes from AVP based on the `refreshIntervalSeconds` configuration (default: 120 seconds).
+
+---
+
 ## Installation
 
 **Repository URL:** `https://github.com/iamatjlovelock/cognito-authorizer-client`

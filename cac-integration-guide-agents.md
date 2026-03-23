@@ -17,6 +17,7 @@ This document provides everything a coding agent needs to integrate the Cognito 
 | **Token not refreshed** after Lambda update | Old token still missing claims | User must log out and log back in to get fresh token |
 | **Translating attribute values** | Policy expects `"Y"` but app sends `"TRUE"` after translation | Pass raw data values - don't translate in the app |
 | **Wrong GitHub repo URL** | 404 or SSH errors during npm install | Use `https://github.com/iamatjlovelock/cognito-authorizer-client` (not `cognito-authorization-client`) |
+| **AWS credentials wrong format** | `Unable to parse config file` error | Use INI format with `[default]` header, not environment variable format |
 | **Package not built after git install** | "Cannot find module" TypeScript errors | Run `npm run build` in the package's node_modules directory |
 | **Missing `schemaOverrideIsInline`** | TypeScript error about missing property | Add `schemaOverrideIsInline: false` to AVP cedar config |
 | **Stale local schema copy** | Integration uses wrong attribute names | Always fetch fresh schema from AVP with `aws verifiedpermissions get-schema` |
@@ -37,6 +38,41 @@ The Cognito Authorization Client is a local authorization solution that:
 - Supports loading policies from Amazon Verified Permissions (AVP) or local files
 - Provides HTTP API endpoints and programmatic SDK access
 
+## Quick Start (Experienced Users)
+
+For those familiar with AVP and Cedar, here's the condensed setup:
+
+1. **Create policy store:**
+   ```bash
+   aws verifiedpermissions create-policy-store --validation-settings "mode=STRICT" \
+     --description "Policy store for APP_NAME (Cognito User Pool: USER_POOL_ID)" --region us-east-1
+   ```
+
+2. **Fetch Cognito custom attributes:**
+   ```bash
+   aws cognito-idp describe-user-pool --user-pool-id USER_POOL_ID \
+     --query 'UserPool.SchemaAttributes[?starts_with(Name, `custom:`)]' --region us-east-1
+   ```
+
+3. **Fetch Cognito groups:**
+   ```bash
+   aws cognito-idp list-groups --user-pool-id USER_POOL_ID --region us-east-1
+   ```
+
+4. **Build Cedar schema** with: User entity (from Cognito attrs, strip `custom:` prefix), Resource entity (from app data), CognitoGroup entity
+
+5. **Upload schema:**
+   ```bash
+   aws verifiedpermissions put-schema --policy-store-id POLICY_STORE_ID \
+     --definition file://schema-definition.json --region us-east-1
+   ```
+
+6. **Create policies** for each Cognito group
+
+Detailed walkthrough follows below.
+
+---
+
 ## Prerequisites
 
 Before integration, ensure:
@@ -44,8 +80,23 @@ Before integration, ensure:
 2. Users authenticate via Amazon Cognito
 3. **The application can access Cognito ID tokens** (not just access tokens - see "Critical: ID Token vs Access Token" section)
 4. Cedar policies exist (either in AVP or as local files) - **or create a new policy store using the "Creating an AVP Policy Store from Scratch" section below**
-5. AWS credentials are configured (for AVP integration)
+5. AWS credentials are configured (for AVP integration) - see "AWS Credentials Setup" below
 6. **If a Pre-Token Generation Lambda exists**, it passes through custom attributes (see "Critical: Pre-Token Generation Lambda Triggers" section)
+
+### AWS Credentials Setup
+
+The AWS credentials file must be in INI format at `~/.aws/credentials` (Windows: `C:\Users\USERNAME\.aws\credentials`):
+
+```ini
+[default]
+aws_access_key_id = YOUR_ACCESS_KEY
+aws_secret_access_key = YOUR_SECRET_KEY
+aws_session_token = YOUR_SESSION_TOKEN
+```
+
+**Note:** The `aws_session_token` line is only required when using temporary credentials (e.g., from AWS SSO, assumed roles, or federation).
+
+**Common mistake:** Environment variable format (e.g., `AWS_ACCESS_KEY_ID=...` without INI structure) won't work - the file must use INI format with `[default]` section header.
 
 ---
 
@@ -78,40 +129,21 @@ Q4: What Cedar namespace should be used?
 
 ### Step 2: Check for Existing Policy Store
 
-Check if a policy store already exists for this Cognito User Pool by checking tags:
+List policy stores and look for one matching your User Pool in the description:
 
 ```bash
-# List all policy stores
 aws verifiedpermissions list-policy-stores \
   --region us-east-1 \
-  --query 'policyStores[*].[id,arn,description]' \
+  --query 'policyStores[*].[policyStoreId,description]' \
   --output table
 ```
 
-For each policy store, check if it has the `CognitoUserPool` tag matching your user pool:
+**If a matching policy store exists**, ask the developer:
 
-```bash
-# Check tags on a specific policy store
-aws verifiedpermissions list-tags-for-resource \
-  --resource-arn arn:aws:verifiedpermissions:us-east-1:ACCOUNT_ID:policy-store/POLICY_STORE_ID \
-  --region us-east-1
 ```
-
-**Alternative: Find policy store by tag using AWS Resource Groups Tagging API:**
-
-```bash
-aws resourcegroupstaggingapi get-resources \
-  --tag-filters Key=CognitoUserPool,Values=USER_POOL_ID \
-  --resource-type-filters verifiedpermissions:policy-store \
-  --region us-east-1
-```
-
-**If a policy store with this user pool tag exists:**
-
-Ask the developer:
-```
-A policy store already exists with alias matching User Pool ID: {USER_POOL_ID}
+A policy store already exists that appears to match your User Pool:
 Policy Store ID: {EXISTING_POLICY_STORE_ID}
+Description: {DESCRIPTION}
 
 Do you want to:
 a) Use the existing policy store (skip creation)
@@ -130,27 +162,18 @@ aws verifiedpermissions delete-policy-store \
 
 ### Step 3: Create the Policy Store
 
-Create a new policy store with the user pool ID tagged for easy identification:
+Create a new policy store. Include the User Pool ID in the description for easy identification:
 
 ```bash
 aws verifiedpermissions create-policy-store \
   --validation-settings "mode=STRICT" \
-  --description "Policy store for APPLICATION_NAME" \
+  --description "Policy store for APPLICATION_NAME (Cognito User Pool: USER_POOL_ID)" \
   --region us-east-1
 ```
 
 Save the returned `policyStoreId` - you'll need it for subsequent commands.
 
-**Tag the policy store with the Cognito User Pool ID:**
-
-```bash
-aws verifiedpermissions tag-resource \
-  --resource-arn arn:aws:verifiedpermissions:us-east-1:ACCOUNT_ID:policy-store/POLICY_STORE_ID \
-  --tags CognitoUserPool=USER_POOL_ID \
-  --region us-east-1
-```
-
-This tag enables you to find the policy store associated with a specific Cognito User Pool later.
+**Note:** Including the User Pool ID in the description makes it easy to find the policy store later. The `tag-resource` API may not be available in all CLI versions.
 
 ### Step 4: Retrieve Cognito User Pool Schema Information
 
@@ -204,6 +227,16 @@ This entity represents Cognito user groups. It typically has no attributes of it
 
 #### 5b: Define the User Entity Type
 
+First, fetch the custom attributes defined in the Cognito User Pool:
+
+```bash
+aws cognito-idp describe-user-pool \
+  --user-pool-id USER_POOL_ID \
+  --region us-east-1 \
+  --query 'UserPool.SchemaAttributes[?starts_with(Name, `custom:`)].[Name,AttributeDataType,Required]' \
+  --output table
+```
+
 Map Cognito user attributes to Cedar User entity attributes. **Remove the `custom:` prefix** from custom attributes:
 
 | Cognito Attribute | Cedar Attribute | Type | Required |
@@ -238,6 +271,8 @@ Example User entity:
 
 #### 5c: Ask About Resource Types
 
+> **Note:** This guide uses "Document" as an example resource type. Replace with your actual resource type (e.g., "Contract", "Report", "Order", "Task").
+
 Ask the developer:
 
 ```
@@ -245,6 +280,7 @@ What types of resources does your application manage access to?
 
 Examples:
 - Document, Report, File (for document management apps)
+- Contract, Agreement, Amendment (for legal/contract management apps)
 - Project, Task, Sprint (for project management apps)
 - Order, Product, Customer (for e-commerce apps)
 - Account, Transaction, Portfolio (for financial apps)
@@ -264,16 +300,16 @@ Present findings to the developer:
 Based on scanning the application code, I found these potential resource types:
 
 1. Document (found in: src/models/document.ts, src/routes/documents.ts)
-   - Properties: id, department, classification, owner, status
+   - Attributes: id, department, classification, owner, status
 
 2. Report (found in: src/models/report.ts)
-   - Properties: id, type, author, department
+   - Attributes: id, type, author, department
 
 Please confirm which resource types should be included in the authorization schema,
-and which properties should be available for policy conditions.
+and which attributes should be available for policy conditions.
 
 NOTE: Properties you include will appear in dropdown lists in the Amazon Verified
-Permissions console when creating attribute-based policies. Only include properties
+Permissions console when creating attribute-based policies. Only include attributes
 that are relevant for authorization decisions.
 ```
 
@@ -442,56 +478,32 @@ Combine all entity types and actions into the complete schema:
 
 ### Step 7: Upload the Schema to AVP
 
-Save the schema to a file and upload it:
+Save the schema to a `cedar-schema.json` file, then create a definition file and upload it.
+
+**Create the schema definition file:**
 
 ```bash
-# Save schema to file (ensure it's valid JSON)
-cat > cedar-schema.json << 'EOF'
-{
-  "NAMESPACE": {
-    ... (schema content)
-  }
-}
-EOF
-
-# Upload schema to AVP
-aws verifiedpermissions put-schema \
-  --policy-store-id POLICY_STORE_ID \
-  --definition "cedarJson=$(cat cedar-schema.json | jq -c '.')" \
-  --region us-east-1
-```
-
-Alternative using file input:
-
-```bash
-# Create the definition file
-echo "{\"cedarJson\": $(cat cedar-schema.json | jq -c '.' | jq -Rs '.')}" > schema-definition.json
-
-# Upload
-aws verifiedpermissions put-schema \
-  --policy-store-id POLICY_STORE_ID \
-  --definition file://schema-definition.json \
-  --region us-east-1
-```
-
-**Alternative using Node.js (when `jq` is not available, e.g., Windows):**
-
-```bash
-# Create the definition file using Node.js
 node -e "
 const fs = require('fs');
 const schema = JSON.parse(fs.readFileSync('cedar-schema.json', 'utf8'));
-const def = { cedarJson: JSON.stringify(schema) };
-fs.writeFileSync('schema-definition.json', JSON.stringify(def));
+fs.writeFileSync('schema-definition.json', JSON.stringify({ cedarJson: JSON.stringify(schema) }));
 console.log('Schema definition created');
 "
+```
 
-# Upload
+**Upload to AVP:**
+
+```bash
 aws verifiedpermissions put-schema \
   --policy-store-id POLICY_STORE_ID \
   --definition file://schema-definition.json \
   --region us-east-1
 ```
+
+> **Linux/Mac with jq:** You can alternatively use jq for JSON manipulation:
+> ```bash
+> echo "{\"cedarJson\": $(cat cedar-schema.json | jq -c '.' | jq -Rs '.')}" > schema-definition.json
+> ```
 
 ### Step 8: Verify the Schema
 
@@ -502,18 +514,342 @@ aws verifiedpermissions get-schema \
   --policy-store-id POLICY_STORE_ID \
   --region us-east-1 \
   --query 'schema' \
-  --output text | jq '.'
+  --output text
 ```
 
-**Alternative using Node.js (when `jq` is not available):**
+To pretty-print the JSON output:
 
 ```bash
-aws verifiedpermissions get-schema \
+# Using Node.js (cross-platform)
+aws verifiedpermissions get-schema --policy-store-id POLICY_STORE_ID --region us-east-1 \
+  --query 'schema' --output text | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.stringify(JSON.parse(d),null,2)))"
+
+# Using jq (Linux/Mac)
+aws verifiedpermissions get-schema --policy-store-id POLICY_STORE_ID --region us-east-1 \
+  --query 'schema' --output text | jq '.'
+```
+
+### Step 9: Create Sample Authorization Policies
+
+After the schema is uploaded, help the developer create sample authorization policies. This demonstrates how policies work and provides a starting point for their authorization logic.
+
+#### 9a: Check for Cognito User Pool Groups
+
+First, check if the Cognito User Pool has any groups defined:
+
+```bash
+aws cognito-idp list-groups \
+  --user-pool-id USER_POOL_ID \
+  --region us-east-1 \
+  --query 'Groups[*].[GroupName,Description]' \
+  --output table
+```
+
+**If groups exist**, present them to the developer:
+
+```
+I found the following groups in your Cognito User Pool:
+
+1. Admins - "Administrative users with full access"
+2. Reviewers - "Users who can review documents"
+3. ReadOnly - "Users with read-only access"
+
+Would you like to create a group-based authorization policy for one of these groups?
+This uses the "Membership permissions" Cedar pattern where access is granted based on group membership.
+
+Which group would you like to create a policy for?
+```
+
+**If no groups exist**, skip to section 9d for attribute-based policies only.
+
+#### 9b: Create Group-Based Policy (Membership Permissions Pattern)
+
+The Membership permissions pattern derives access rights from a principal's inclusion in a group. This is the Cedar equivalent of Role-Based Access Control (RBAC).
+
+Ask the developer:
+
+```
+For the "{GROUP_NAME}" group, which actions should members be permitted to perform?
+
+Available actions (from your schema):
+- VIEW
+- EDIT
+- DELETE
+- CREATE
+
+Select the actions members of "{GROUP_NAME}" should be allowed to perform:
+```
+
+**Policy Annotation Convention:**
+
+Group-based policies should include the `@id` annotation with the group name. This makes policies easier to identify and manage:
+
+```cedar
+@id("group-name")
+permit (...)
+```
+
+**Basic group policy example (no conditions):**
+
+```cedar
+@id("Reviewers")
+// Members of the Reviewers group can VIEW and EDIT documents
+permit (
+  principal in NAMESPACE::CognitoGroup::"Reviewers",
+  action in [NAMESPACE::Action::"VIEW", NAMESPACE::Action::"EDIT"],
+  resource is NAMESPACE::Document
+);
+```
+
+#### 9c: Add Attribute-Based Conditions to Group Policy
+
+After defining the basic group policy, prompt the developer to add attribute-based conditions. This combines RBAC with Attribute-Based Access Control (ABAC).
+
+Present the resource attributes from the schema:
+
+```
+Your "{RESOURCE_TYPE}" resource type has these attributes available for policy conditions:
+- department (String)
+- classification (String)
+- status (String)
+- owner (String)
+
+Would you like to restrict what members of "{GROUP_NAME}" can access based on one of these attributes?
+
+For example:
+- Only allow access to documents with status = "Active"
+- Only allow access to documents in a specific department
+- Only allow access to documents with classification = "Internal"
+
+Enter an attribute-based condition, or type "none" to skip:
+Example: "status equals Active" or "classification equals Internal"
+```
+
+**If the developer provides a condition**, convert it to a Cedar `when` clause:
+
+| Developer Input | Cedar Condition |
+|-----------------|-----------------|
+| "status equals Active" | `when { resource.status == "Active" }` |
+| "status equals Draft or Review" | `when { resource.status == "Draft" \|\| resource.status == "Review" }` |
+| "classification equals Internal" | `when { resource.classification == "Internal" }` |
+| "department equals Engineering" | `when { resource.department == "Engineering" }` |
+
+**Complete policy with attribute condition:**
+
+```cedar
+@id("Reviewers")
+// Members of the Reviewers group can VIEW documents with status "Draft" or "Review"
+permit (
+  principal in NAMESPACE::CognitoGroup::"Reviewers",
+  action == NAMESPACE::Action::"VIEW",
+  resource is NAMESPACE::Document
+) when {
+  resource.status == "Draft" || resource.status == "Review"
+};
+```
+
+**More advanced: Combine multiple conditions:**
+
+```cedar
+@id("Reviewers")
+// Reviewers can EDIT documents that are in Draft status AND in their department
+permit (
+  principal in NAMESPACE::CognitoGroup::"Reviewers",
+  action == NAMESPACE::Action::"EDIT",
+  resource is NAMESPACE::Document
+) when {
+  resource.status == "Draft" &&
+  resource.department == principal.user_region
+};
+```
+
+#### 9d: Create the Policy in AVP
+
+Once the developer confirms the policy, create it in the policy store:
+
+```bash
+# Create a static policy
+aws verifiedpermissions create-policy \
+  --policy-store-id POLICY_STORE_ID \
+  --definition '{
+    "static": {
+      "description": "Reviewers can view documents in Draft or Review status",
+      "statement": "@id(\"Reviewers\")\npermit (\n  principal in NAMESPACE::CognitoGroup::\"Reviewers\",\n  action == NAMESPACE::Action::\"VIEW\",\n  resource is NAMESPACE::Document\n) when {\n  resource.status == \"Draft\" || resource.status == \"Review\"\n};"
+    }
+  }' \
+  --region us-east-1
+```
+
+**Alternative using a file (recommended for complex policies):**
+
+```bash
+# Save policy to file
+cat > sample-policy.json << 'EOF'
+{
+  "static": {
+    "description": "Reviewers can view documents in Draft or Review status",
+    "statement": "@id(\"Reviewers\")\npermit (\n  principal in NAMESPACE::CognitoGroup::\"Reviewers\",\n  action == NAMESPACE::Action::\"VIEW\",\n  resource is NAMESPACE::Document\n) when {\n  resource.status == \"Draft\" || resource.status == \"Review\"\n};"
+  }
+}
+EOF
+
+# Create the policy
+aws verifiedpermissions create-policy \
+  --policy-store-id POLICY_STORE_ID \
+  --definition file://sample-policy.json \
+  --region us-east-1
+```
+
+**Alternative using Node.js (when complex escaping is needed):**
+
+```bash
+node -e "
+const { execSync } = require('child_process');
+
+const policy = {
+  static: {
+    description: 'Reviewers can view documents in Draft or Review status',
+    statement: \`@id(\"Reviewers\")
+permit (
+  principal in NAMESPACE::CognitoGroup::\"Reviewers\",
+  action == NAMESPACE::Action::\"VIEW\",
+  resource is NAMESPACE::Document
+) when {
+  resource.status == \"Draft\" || resource.status == \"Review\"
+};\`
+  }
+};
+
+require('fs').writeFileSync('sample-policy.json', JSON.stringify(policy, null, 2));
+console.log('Policy file created');
+"
+
+aws verifiedpermissions create-policy \
+  --policy-store-id POLICY_STORE_ID \
+  --definition file://sample-policy.json \
+  --region us-east-1
+```
+
+#### 9e: Verify the Policy Was Created
+
+```bash
+# List policies in the store
+aws verifiedpermissions list-policies \
   --policy-store-id POLICY_STORE_ID \
   --region us-east-1 \
-  --query 'schema' \
-  --output text | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.stringify(JSON.parse(d),null,2)))"
+  --query 'policies[*].[policyId,policyType,definition.static.description]' \
+  --output table
 ```
+
+#### 9f: Offer to Create Additional Policies
+
+After creating the first policy, ask the developer:
+
+```
+Policy created successfully!
+
+Would you like to create additional policies? Common patterns include:
+
+1. **Admin full access** - Admins group can perform all actions on all resources
+   Example: permit(principal in CognitoGroup::"Admins", action, resource);
+
+2. **Owner-based access** - Users can edit resources they own
+   Example: permit(...) when { resource.owner == principal.sub };
+
+3. **Another group policy** - Create policy for a different group
+
+Enter a number (1-3) or "done" to finish:
+```
+
+**Admin full access policy:**
+
+```cedar
+@id("Admins")
+// Administrators have full access to all documents
+permit (
+  principal in NAMESPACE::CognitoGroup::"Admins",
+  action,
+  resource is NAMESPACE::Document
+);
+```
+
+**Owner-based access policy:**
+
+```cedar
+// Users can edit documents they own
+permit (
+  principal is NAMESPACE::User,
+  action == NAMESPACE::Action::"EDIT",
+  resource is NAMESPACE::Document
+) when {
+  resource.owner == principal.sub
+};
+```
+
+#### Cedar Policy Quick Reference
+
+| Pattern | Cedar Syntax |
+|---------|--------------|
+| Group membership | `principal in NAMESPACE::CognitoGroup::"GroupName"` |
+| Any user | `principal is NAMESPACE::User` |
+| Single action | `action == NAMESPACE::Action::"VIEW"` |
+| Multiple actions | `action in [NAMESPACE::Action::"VIEW", NAMESPACE::Action::"EDIT"]` |
+| Any action | `action` |
+| Resource type | `resource is NAMESPACE::Document` |
+| String equality | `resource.status == "Active"` |
+| OR condition | `resource.status == "A" \|\| resource.status == "B"` |
+| AND condition | `resource.status == "A" && resource.department == "Eng"` |
+| Principal-resource match | `resource.department == principal.user_region` |
+| Owner check | `resource.owner == principal.sub` |
+
+#### Creating Multiple Policies Programmatically
+
+When creating policies for multiple Cognito groups, use a script to generate and upload them:
+
+```javascript
+// create-policies.js
+const { execSync } = require('child_process');
+const fs = require('fs');
+
+const POLICY_STORE_ID = 'YOUR_POLICY_STORE_ID';
+const REGION = 'us-east-1';
+const NAMESPACE = 'NAMESPACE';
+const RESOURCE_TYPE = 'Contract'; // Change to your resource type
+
+const policies = [
+  { group: 'legal-interns', actions: ['REVIEW'] },
+  { group: 'outside-counsel', actions: ['REVIEW', 'EDIT'] },
+  { group: 'inhouse-counsel', actions: ['REVIEW', 'EDIT', 'APPROVE'] },
+  { group: 'operations-team', actions: ['REVIEW', 'EDIT', 'ARCHIVE'] },
+];
+
+policies.forEach(p => {
+  const actionClause = p.actions.length === 1
+    ? `== ${NAMESPACE}::Action::"${p.actions[0]}"`
+    : `in [${p.actions.map(a => `${NAMESPACE}::Action::"${a}"`).join(', ')}]`;
+
+  const statement = `@id("${p.group}")\npermit (principal in ${NAMESPACE}::CognitoGroup::"${p.group}", action ${actionClause}, resource is ${NAMESPACE}::${RESOURCE_TYPE});`;
+
+  const policy = {
+    static: {
+      description: `${p.group} can ${p.actions.join(', ')} ${RESOURCE_TYPE.toLowerCase()}s`,
+      statement: statement
+    }
+  };
+
+  const filename = `policy-${p.group}.json`;
+  fs.writeFileSync(filename, JSON.stringify(policy, null, 2));
+
+  try {
+    execSync(`aws verifiedpermissions create-policy --policy-store-id ${POLICY_STORE_ID} --definition file://${filename} --region ${REGION}`);
+    console.log(`Created policy for ${p.group}`);
+  } catch (err) {
+    console.error(`Failed to create policy for ${p.group}:`, err.message);
+  }
+});
+```
+
+Run with: `node create-policies.js`
 
 ### Summary: Questions to Ask When Creating Policy Store
 
@@ -525,8 +861,12 @@ aws verifiedpermissions get-schema \
 | 1 | What Cedar namespace? |
 | 2 | (If exists) Delete existing policy store or use it? |
 | 5c | What resource types does the application manage? |
-| 5c | Which resource properties should be usable in policies? |
+| 5c | Which resource attributes should be usable in policies? |
 | 5e | Which actions should be defined for each resource? |
+| 9a | Which Cognito group should have a policy? |
+| 9b | Which actions should the group be permitted to perform? |
+| 9c | Should access be restricted by a resource attribute condition? |
+| 9f | Would you like to create additional policies? |
 
 ### Cedar Schema Reference
 
