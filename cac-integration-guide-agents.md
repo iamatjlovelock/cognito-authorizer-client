@@ -67,29 +67,46 @@ Q2: What AWS region should the policy store be created in?
 Q3: What is the name of your application?
     (Used for the policy store description)
 
+    IMPORTANT: This is the business application whose resources will be protected
+    by authorization policies (e.g., "Contract Management System", "Document Portal").
+    This is NOT the name of admin tools or policy management UIs that configure policies.
+
 Q4: What Cedar namespace should be used?
-    Example: MyApp, ContractManager, NAMESPACE
-    This appears in policy statements like: MyApp::User, MyApp::Action::"REVIEW"
+    Example: MyApp, TaskManager, NAMESPACE
+    This appears in policy statements like: MyApp::User, MyApp::Action::"VIEW"
 ```
 
 ### Step 2: Check for Existing Policy Store
 
-Check if a policy store already exists with the Cognito User Pool ID as an alias:
+Check if a policy store already exists for this Cognito User Pool by checking tags:
 
 ```bash
-# List all policy stores and check for matching alias
-aws verifiedpermissions list-policy-stores \
-  --region us-east-1 \
-  --output json | jq '.policyStores[] | select(.description | contains("USER_POOL_ID"))'
-
-# Or search by listing all and checking aliases
+# List all policy stores
 aws verifiedpermissions list-policy-stores \
   --region us-east-1 \
   --query 'policyStores[*].[id,arn,description]' \
   --output table
 ```
 
-**If a policy store with this user pool alias exists:**
+For each policy store, check if it has the `CognitoUserPool` tag matching your user pool:
+
+```bash
+# Check tags on a specific policy store
+aws verifiedpermissions list-tags-for-resource \
+  --resource-arn arn:aws:verifiedpermissions:us-east-1:ACCOUNT_ID:policy-store/POLICY_STORE_ID \
+  --region us-east-1
+```
+
+**Alternative: Find policy store by tag using AWS Resource Groups Tagging API:**
+
+```bash
+aws resourcegroupstaggingapi get-resources \
+  --tag-filters Key=CognitoUserPool,Values=USER_POOL_ID \
+  --resource-type-filters verifiedpermissions:policy-store \
+  --region us-east-1
+```
+
+**If a policy store with this user pool tag exists:**
 
 Ask the developer:
 ```
@@ -113,16 +130,27 @@ aws verifiedpermissions delete-policy-store \
 
 ### Step 3: Create the Policy Store
 
-Create a new policy store with the user pool ID as the alias (in description):
+Create a new policy store with the user pool ID tagged for easy identification:
 
 ```bash
 aws verifiedpermissions create-policy-store \
   --validation-settings "mode=STRICT" \
-  --description "Policy store for APPLICATION_NAME (Cognito User Pool: USER_POOL_ID)" \
+  --description "Policy store for APPLICATION_NAME" \
   --region us-east-1
 ```
 
 Save the returned `policyStoreId` - you'll need it for subsequent commands.
+
+**Tag the policy store with the Cognito User Pool ID:**
+
+```bash
+aws verifiedpermissions tag-resource \
+  --resource-arn arn:aws:verifiedpermissions:us-east-1:ACCOUNT_ID:policy-store/POLICY_STORE_ID \
+  --tags CognitoUserPool=USER_POOL_ID \
+  --region us-east-1
+```
+
+This tag enables you to find the policy store associated with a specific Cognito User Pool later.
 
 ### Step 4: Retrieve Cognito User Pool Schema Information
 
@@ -216,7 +244,7 @@ Ask the developer:
 What types of resources does your application manage access to?
 
 Examples:
-- Contract, Document, Report (for document management apps)
+- Document, Report, File (for document management apps)
 - Project, Task, Sprint (for project management apps)
 - Order, Product, Customer (for e-commerce apps)
 - Account, Transaction, Portfolio (for financial apps)
@@ -226,7 +254,7 @@ List the resource types that should be protected by authorization policies:
 
 **Scan the application code** to identify candidate resource types:
 - Look for database models/entities
-- Look for API route patterns (e.g., `/contracts/:id`, `/projects/:id`)
+- Look for API route patterns (e.g., `/documents/:id`, `/projects/:id`)
 - Look for TypeScript/JavaScript interfaces or types
 - Look for class definitions representing business objects
 
@@ -235,8 +263,8 @@ Present findings to the developer:
 ```
 Based on scanning the application code, I found these potential resource types:
 
-1. Contract (found in: src/models/contract.ts, src/routes/contracts.ts)
-   - Properties: id, region, client, status, size, government
+1. Document (found in: src/models/document.ts, src/routes/documents.ts)
+   - Properties: id, department, classification, owner, status
 
 2. Report (found in: src/models/report.ts)
    - Properties: id, type, author, department
@@ -254,15 +282,14 @@ that are relevant for authorization decisions.
 For each confirmed resource type, create an entity definition:
 
 ```json
-"Contract": {
+"Document": {
   "shape": {
     "type": "Record",
     "attributes": {
-      "Region": { "type": "String" },
-      "Client": { "type": "String" },
-      "Status": { "type": "String" },
-      "Size": { "type": "String" },
-      "Government": { "type": "String" }
+      "department": { "type": "String" },
+      "classification": { "type": "String" },
+      "owner": { "type": "String" },
+      "status": { "type": "String" }
     }
   }
 }
@@ -285,12 +312,11 @@ Ask the developer:
 ```
 Based on scanning the application code, I found these potential actions for each resource:
 
-Contract:
-- REVIEW (found: GET /contracts/:id, viewContract function)
-- EDIT (found: PUT /contracts/:id, updateContract function)
-- APPROVE (found: POST /contracts/:id/approve)
-- ARCHIVE (found: DELETE /contracts/:id)
-- CREATE (found: POST /contracts)
+Document:
+- VIEW (found: GET /documents/:id, viewDocument function)
+- EDIT (found: PUT /documents/:id, updateDocument function)
+- DELETE (found: DELETE /documents/:id)
+- CREATE (found: POST /documents)
 
 Report:
 - VIEW (found: GET /reports/:id)
@@ -305,37 +331,37 @@ Define actions in the schema:
 
 ```json
 "actions": {
-  "REVIEW": {
+  "VIEW": {
     "appliesTo": {
       "principalTypes": ["User"],
-      "resourceTypes": ["Contract"]
+      "resourceTypes": ["Document", "Report"]
     }
   },
   "EDIT": {
     "appliesTo": {
       "principalTypes": ["User"],
-      "resourceTypes": ["Contract"]
+      "resourceTypes": ["Document"]
     }
   },
-  "APPROVE": {
+  "DELETE": {
     "appliesTo": {
       "principalTypes": ["User"],
-      "resourceTypes": ["Contract"]
+      "resourceTypes": ["Document"]
     }
   },
-  "ARCHIVE": {
+  "CREATE": {
     "appliesTo": {
       "principalTypes": ["User"],
-      "resourceTypes": ["Contract"]
+      "resourceTypes": ["Document"]
     }
   },
-  "VIEW": {
+  "GENERATE": {
     "appliesTo": {
       "principalTypes": ["User"],
       "resourceTypes": ["Report"]
     }
   },
-  "GENERATE": {
+  "EXPORT": {
     "appliesTo": {
       "principalTypes": ["User"],
       "resourceTypes": ["Report"]
@@ -370,42 +396,41 @@ Combine all entity types and actions into the complete schema:
           }
         }
       },
-      "Contract": {
+      "Document": {
         "shape": {
           "type": "Record",
           "attributes": {
-            "Region": { "type": "String" },
-            "Client": { "type": "String" },
-            "Status": { "type": "String" },
-            "Size": { "type": "String" },
-            "Government": { "type": "String" }
+            "department": { "type": "String" },
+            "classification": { "type": "String" },
+            "owner": { "type": "String" },
+            "status": { "type": "String" }
           }
         }
       }
     },
     "actions": {
-      "REVIEW": {
+      "VIEW": {
         "appliesTo": {
           "principalTypes": ["User"],
-          "resourceTypes": ["Contract"]
+          "resourceTypes": ["Document"]
         }
       },
       "EDIT": {
         "appliesTo": {
           "principalTypes": ["User"],
-          "resourceTypes": ["Contract"]
+          "resourceTypes": ["Document"]
         }
       },
-      "APPROVE": {
+      "DELETE": {
         "appliesTo": {
           "principalTypes": ["User"],
-          "resourceTypes": ["Contract"]
+          "resourceTypes": ["Document"]
         }
       },
-      "ARCHIVE": {
+      "CREATE": {
         "appliesTo": {
           "principalTypes": ["User"],
-          "resourceTypes": ["Contract"]
+          "resourceTypes": ["Document"]
         }
       }
     }
@@ -449,6 +474,25 @@ aws verifiedpermissions put-schema \
   --region us-east-1
 ```
 
+**Alternative using Node.js (when `jq` is not available, e.g., Windows):**
+
+```bash
+# Create the definition file using Node.js
+node -e "
+const fs = require('fs');
+const schema = JSON.parse(fs.readFileSync('cedar-schema.json', 'utf8'));
+const def = { cedarJson: JSON.stringify(schema) };
+fs.writeFileSync('schema-definition.json', JSON.stringify(def));
+console.log('Schema definition created');
+"
+
+# Upload
+aws verifiedpermissions put-schema \
+  --policy-store-id POLICY_STORE_ID \
+  --definition file://schema-definition.json \
+  --region us-east-1
+```
+
 ### Step 8: Verify the Schema
 
 Confirm the schema was uploaded correctly:
@@ -459,6 +503,16 @@ aws verifiedpermissions get-schema \
   --region us-east-1 \
   --query 'schema' \
   --output text | jq '.'
+```
+
+**Alternative using Node.js (when `jq` is not available):**
+
+```bash
+aws verifiedpermissions get-schema \
+  --policy-store-id POLICY_STORE_ID \
+  --region us-east-1 \
+  --query 'schema' \
+  --output text | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.stringify(JSON.parse(d),null,2)))"
 ```
 
 ### Summary: Questions to Ask When Creating Policy Store
@@ -510,7 +564,7 @@ aws verifiedpermissions get-schema \
     "memberOf": [{ "id": "readOnly" }],
     "appliesTo": {
       "principalTypes": ["User"],
-      "resourceTypes": ["Contract"]
+      "resourceTypes": ["Document"]
     }
   }
 }
@@ -598,8 +652,8 @@ Create a correlation table to verify alignment:
 | ID Token | `custom:user_type` | `user_type` | Strip `custom:` prefix |
 | ID Token | `custom:user_region` | `user_region` | Strip `custom:` prefix |
 | ID Token | `email` | `email` | Standard claim, no change |
-| App Data | `contract.region` | `Region` (Contract) | Resource attribute |
-| App Data | `contract.client` | `Client` (Contract) | Resource attribute |
+| App Data | `resource.department` | `department` (Resource) | Resource attribute |
+| App Data | `resource.status` | `status` (Resource) | Resource attribute |
 
 **If any mismatch exists, ask for clarification before proceeding.**
 
@@ -622,7 +676,7 @@ attributeMapping: {
 
 **Important distinction:**
 - **Principal attributes** (User): Come from ID token, use `attributeMapping`
-- **Resource attributes** (Contract): Come from application data, set in `additionalEntities`
+- **Resource attributes** (e.g., Document): Come from application data, set in `additionalEntities`
 
 ---
 
@@ -748,27 +802,26 @@ The SDK does **NOT** have a `batchAuthorize` method. For batch authorization, us
 
 ```typescript
 // Check multiple actions in parallel
-const actions = ['REVIEW', 'EDIT', 'APPROVE', 'ARCHIVE'];
+const actions = ['VIEW', 'EDIT', 'DELETE'];
 const results = await Promise.all(
   actions.map(action => client.authorize({
     token: idToken,
     action,
-    resource: { type: 'Contract', id: contractId },
-    additionalEntities: [contractEntity],
+    resource: { type: 'Document', id: resourceId },
+    additionalEntities: [resourceEntity],
   }))
 );
 
 const permissions = {
-  review: results[0].allowed,
+  view: results[0].allowed,
   edit: results[1].allowed,
-  approve: results[2].allowed,
-  archive: results[3].allowed,
+  delete: results[2].allowed,
 };
 ```
 
 ### Critical: Authorizing Resource Lists
 
-When listing resources (e.g., "show all contracts the user can view"), you need a strategy for authorization. **Do NOT use placeholder entities with dummy attributes.**
+When listing resources (e.g., "show all documents the user can view"), you need a strategy for authorization. **Do NOT use placeholder entities with dummy attributes.**
 
 #### Why Placeholder Entities Don't Work
 
@@ -776,18 +829,18 @@ When listing resources (e.g., "show all contracts the user can view"), you need 
 // ❌ WRONG: Using a placeholder entity
 const result = await client.authorize({
   token: idToken,
-  action: 'REVIEW',
-  resource: { type: 'Contract', id: 'any' },
+  action: 'VIEW',
+  resource: { type: 'Document', id: 'any' },
   additionalEntities: [{
-    uid: { type: 'NAMESPACE::Contract', id: 'any' },
-    attrs: { Region: '*', Size: '*', Government: '*', Client: '*', Status: 'Active' },
+    uid: { type: 'NAMESPACE::Document', id: 'any' },
+    attrs: { department: '*', classification: '*', owner: '*', status: 'Active' },
     parents: [],
   }],
 });
 ```
 
 **Problems:**
-1. If policies check `principal.user_region == resource.Region`, the wildcard `*` won't match
+1. If policies check `principal.user_region == resource.department`, the wildcard `*` won't match
 2. Results don't reflect actual permissions for real resources
 3. Users may see an empty list or get access to resources they shouldn't
 
@@ -796,29 +849,29 @@ const result = await client.authorize({
 Authorize each resource in parallel and filter to only those the user can access:
 
 ```typescript
-// ✅ CORRECT: Authorize each contract individually
-router.get('/contracts', async (req, res) => {
+// ✅ CORRECT: Authorize each resource individually
+router.get('/documents', async (req, res) => {
   const idToken = getIdToken(req);
 
   // Get all resources (need full data for authorization)
-  const allContracts = readContracts();
+  const allDocuments = readDocuments();
 
-  // Authorize REVIEW for each contract in parallel
+  // Authorize VIEW for each document in parallel
   const authResults = await Promise.all(
-    allContracts.map(contract =>
+    allDocuments.map(doc =>
       client.authorize({
         token: idToken,
-        action: 'REVIEW',
-        resource: { type: 'Contract', id: contract.id },
-        additionalEntities: [buildContractEntity(contract)],
+        action: 'VIEW',
+        resource: { type: 'Document', id: doc.id },
+        additionalEntities: [buildDocumentEntity(doc)],
       })
     )
   );
 
-  // Filter to only contracts the user can REVIEW
-  const authorizedContracts = allContracts.filter((_, i) => authResults[i].allowed);
+  // Filter to only documents the user can VIEW
+  const authorizedDocuments = allDocuments.filter((_, i) => authResults[i].allowed);
 
-  res.json({ contracts: authorizedContracts });
+  res.json({ documents: authorizedDocuments });
 });
 ```
 
@@ -837,8 +890,8 @@ You might be tempted to filter resources in application code based on user attri
 
 ```typescript
 // ❌ AVOID: Hardcoding policy logic in application
-const userRegion = claims['custom:user_region'];
-const visibleContracts = allContracts.filter(c => c.region === userRegion);
+const userDepartment = claims['custom:department'];
+const visibleDocs = allDocuments.filter(d => d.department === userDepartment);
 ```
 
 **This defeats the purpose of externalized authorization:**
@@ -853,15 +906,15 @@ const visibleContracts = allContracts.filter(c => c.region === userRegion);
 If listing should be open to all authenticated users, create a permissive policy for the list action:
 
 ```cedar
-// Policy: All authenticated users can REVIEW (list) contracts
+// Policy: All authenticated users can VIEW (list) documents
 permit(
   principal is NAMESPACE::User,
-  action == NAMESPACE::Action::"REVIEW",
-  resource is NAMESPACE::Contract
+  action == NAMESPACE::Action::"VIEW",
+  resource is NAMESPACE::Document
 );
 ```
 
-Then use stricter policies for modification actions (EDIT, APPROVE, ARCHIVE).
+Then use stricter policies for modification actions (EDIT, DELETE).
 
 **Use this only if:**
 - Listing is intentionally unrestricted
@@ -942,13 +995,12 @@ import { createClient, CognitoAuthorizationClient, AuthzResponse } from 'cognito
 
 const NAMESPACE = 'NAMESPACE';
 
-export type ContractAction = 'REVIEW' | 'EDIT' | 'APPROVE' | 'ARCHIVE';
+export type ResourceAction = 'VIEW' | 'EDIT' | 'DELETE';
 
-export interface ContractPermissions {
-  review: boolean;
+export interface ResourcePermissions {
+  view: boolean;
   edit: boolean;
-  approve: boolean;
-  archive: boolean;
+  delete: boolean;
 }
 
 // Singleton client
@@ -994,33 +1046,32 @@ function getClient(): CognitoAuthorizationClient {
   return authClient;
 }
 
-// Build Cedar entity for a contract
-function buildContractEntity(contract: { id: string; region: string; size: string; government: string; client: string; status: string }) {
+// Build Cedar entity for a resource
+function buildResourceEntity(resource: { id: string; department: string; classification: string; owner: string; status: string }) {
   return {
-    uid: { type: `${NAMESPACE}::Contract`, id: contract.id },
+    uid: { type: `${NAMESPACE}::Document`, id: resource.id },
     attrs: {
-      Region: contract.region,      // Pass raw values!
-      Size: contract.size,
-      Government: contract.government,
-      Client: contract.client,
-      Status: contract.status,
+      department: resource.department,      // Pass raw values!
+      classification: resource.classification,
+      owner: resource.owner,
+      status: resource.status,
     },
     parents: [],
   };
 }
 
 // Authorize single action
-export async function authorizeContractAction(
+export async function authorizeResourceAction(
   idToken: string,
-  action: ContractAction,
-  contract: { id: string; region: string; size: string; government: string; client: string; status: string }
+  action: ResourceAction,
+  resource: { id: string; department: string; classification: string; owner: string; status: string }
 ): Promise<{ allowed: boolean; diagnostics: { reason: string[]; errors: string[] } }> {
   try {
     const result = await getClient().authorize({
       token: idToken,
       action,
-      resource: { type: 'Contract', id: contract.id },
-      additionalEntities: [buildContractEntity(contract)],
+      resource: { type: 'Document', id: resource.id },
+      additionalEntities: [buildResourceEntity(resource)],
     });
     return { allowed: result.allowed, diagnostics: result.diagnostics };
   } catch (error) {
@@ -1029,13 +1080,13 @@ export async function authorizeContractAction(
   }
 }
 
-// Get all permissions for a contract (parallel calls)
-export async function getContractPermissions(
+// Get all permissions for a resource (parallel calls)
+export async function getResourcePermissions(
   idToken: string,
-  contract: { id: string; region: string; size: string; government: string; client: string; status: string }
-): Promise<ContractPermissions> {
-  const actions: ContractAction[] = ['REVIEW', 'EDIT', 'APPROVE', 'ARCHIVE'];
-  const contractEntity = buildContractEntity(contract);
+  resource: { id: string; department: string; classification: string; owner: string; status: string }
+): Promise<ResourcePermissions> {
+  const actions: ResourceAction[] = ['VIEW', 'EDIT', 'DELETE'];
+  const resourceEntity = buildResourceEntity(resource);
 
   try {
     const results = await Promise.all(
@@ -1043,21 +1094,20 @@ export async function getContractPermissions(
         getClient().authorize({
           token: idToken,
           action,
-          resource: { type: 'Contract', id: contract.id },
-          additionalEntities: [contractEntity],
+          resource: { type: 'Document', id: resource.id },
+          additionalEntities: [resourceEntity],
         })
       )
     );
 
     return {
-      review: results[0]?.allowed ?? false,
+      view: results[0]?.allowed ?? false,
       edit: results[1]?.allowed ?? false,
-      approve: results[2]?.allowed ?? false,
-      archive: results[3]?.allowed ?? false,
+      delete: results[2]?.allowed ?? false,
     };
   } catch (error) {
     console.error('Batch authorization error:', error);
-    return { review: false, edit: false, approve: false, archive: false };
+    return { view: false, edit: false, delete: false };
   }
 }
 ```
@@ -1090,10 +1140,10 @@ start();
 ### 3. Use in Routes
 
 ```typescript
-// src/routes/contracts.ts
+// src/routes/documents.ts
 import { Router, Request, Response } from 'express';
-import { authorizeContractAction, getContractPermissions } from '../lib/cac-client';
-import { getContractById } from '../lib/contracts';
+import { authorizeResourceAction, getResourcePermissions } from '../lib/cac-client';
+import { getDocumentById } from '../lib/documents';
 
 const router = Router();
 
@@ -1108,21 +1158,21 @@ router.get('/:id', async (req: Request, res: Response) => {
     return res.status(401).json({ error: 'Missing ID token' });
   }
 
-  const contract = getContractById(req.params.id);
-  if (!contract) {
-    return res.status(404).json({ error: 'Contract not found' });
+  const document = getDocumentById(req.params.id);
+  if (!document) {
+    return res.status(404).json({ error: 'Document not found' });
   }
 
-  // Check REVIEW permission
-  const authResult = await authorizeContractAction(idToken, 'REVIEW', contract);
+  // Check VIEW permission
+  const authResult = await authorizeResourceAction(idToken, 'VIEW', document);
   if (!authResult.allowed) {
     return res.status(403).json({ error: 'Access denied', diagnostics: authResult.diagnostics });
   }
 
-  // Get all permissions for this contract
-  const permissions = await getContractPermissions(idToken, contract);
+  // Get all permissions for this document
+  const permissions = await getResourcePermissions(idToken, document);
 
-  res.json({ contract, permissions });
+  res.json({ document, permissions });
 });
 
 export default router;
@@ -1186,8 +1236,8 @@ If No policy store (option c):
 
 ```
 Q5: What Cedar namespace do your policies use?
-    Example: MyApp, ContractApp, NAMESPACE
-    This appears in policy statements like: MyApp::User, MyApp::Action::"read"
+    Example: MyApp, DocManager, NAMESPACE
+    This appears in policy statements like: MyApp::User, MyApp::Action::"VIEW"
 ```
 
 ### 4. Integration Pattern
@@ -1233,12 +1283,12 @@ headers['X-Id-Token'] = idToken;  // CAC uses this
 ```typescript
 // WRONG
 attrs: {
-  Government: contract.government === 'Y' ? 'TRUE' : 'FALSE',  // ❌
+  classification: resource.classification === 'Y' ? 'TRUE' : 'FALSE',  // ❌
 }
 
 // CORRECT
 attrs: {
-  Government: contract.government,  // ✅ Pass "Y" or "N" as stored
+  classification: resource.classification,  // ✅ Pass "Y" or "N" as stored
 }
 ```
 
@@ -1263,13 +1313,13 @@ attrs: {
 
 **Important distinction:**
 - **Principal attributes** (User entity): Sourced from ID token, mapped via `attributeMapping`
-- **Resource attributes** (e.g., Contract entity): Sourced from application data, provided in `additionalEntities`
+- **Resource attributes** (e.g., Document entity): Sourced from application data, provided in `additionalEntities`
 
 These may have different names. For example:
 - User has `user_region` (from token `custom:user_region`)
-- Contract has `Region` (from application data)
+- Document has `department` (from application data)
 
-Policies can compare them: `principal.user_region == resource.Region`
+Policies can compare them: `principal.user_region == resource.department`
 
 ### Integration Checklist
 
@@ -1309,18 +1359,18 @@ AVP Schema (User entity attributes):
   - user_region: String     ✅ Matches (after stripping custom:)
   - email: String           ✅ Matches
 
-AVP Schema (Contract entity attributes):
-  - Region: String          (different from user_region - this is OK)
-  - Client: String
-  - Status: String
+AVP Schema (Document entity attributes):
+  - department: String      (different from user_region - this is OK)
+  - classification: String
+  - status: String
 
 Authorization Request:
   Principal attributes (from token):
     - user_type: "REVIEWER"   ✅ Correct
     - user_region: "US"       ✅ Correct
   Resource attributes (from app data):
-    - Region: "US"            ✅ Correct (matches Contract schema)
-    - Client: "Acme Corp"     ✅ Correct
+    - department: "Engineering"  ✅ Correct (matches Document schema)
+    - classification: "Internal" ✅ Correct
 ```
 
 ### Common Misalignment Issues
@@ -1368,11 +1418,11 @@ Include `additionalEntities` with the resource:
 ```typescript
 await client.authorize({
   token: idToken,
-  action: 'REVIEW',
-  resource: { type: 'Contract', id: 'contract-123' },
+  action: 'VIEW',
+  resource: { type: 'Document', id: 'doc-123' },
   additionalEntities: [{
-    uid: { type: 'NAMESPACE::Contract', id: 'contract-123' },
-    attrs: { Region: 'US', Size: 'M' },
+    uid: { type: 'NAMESPACE::Document', id: 'doc-123' },
+    attrs: { department: 'Engineering', status: 'Active' },
     parents: [],
   }],
 });

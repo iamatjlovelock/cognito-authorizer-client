@@ -137,14 +137,14 @@ const client = await createClient({
 ```typescript
 const result = await client.authorize({
   token: idToken,  // Must be ID token, not access token
-  action: 'REVIEW',
-  resource: { type: 'Contract', id: 'contract-123' },
+  action: 'VIEW',
+  resource: { type: 'Document', id: 'doc-123' },
   additionalEntities: [{
-    uid: { type: 'MyApp::Contract', id: 'contract-123' },
+    uid: { type: 'MyApp::Document', id: 'doc-123' },
     attrs: {
-      Region: contract.region,    // Pass raw values
-      Client: contract.client,
-      Status: contract.status,
+      department: document.department,    // Pass raw values
+      classification: document.classification,
+      status: document.status,
     },
     parents: [],
   }],
@@ -160,21 +160,20 @@ if (result.allowed) {
 There's no batch method in the SDK. Use `Promise.all` for parallel authorization:
 
 ```typescript
-const actions = ['REVIEW', 'EDIT', 'APPROVE', 'ARCHIVE'];
+const actions = ['VIEW', 'EDIT', 'DELETE'];
 const results = await Promise.all(
   actions.map(action => client.authorize({
     token: idToken,
     action,
-    resource: { type: 'Contract', id: contractId },
-    additionalEntities: [contractEntity],
+    resource: { type: 'Document', id: resourceId },
+    additionalEntities: [resourceEntity],
   }))
 );
 
 const permissions = {
-  review: results[0].allowed,
+  view: results[0].allowed,
   edit: results[1].allowed,
-  approve: results[2].allowed,
-  archive: results[3].allowed,
+  delete: results[2].allowed,
 };
 ```
 
@@ -182,28 +181,28 @@ const permissions = {
 
 ## Authorizing Resource Lists
 
-When showing a list of resources (e.g., "all contracts the user can view"), you need to authorize access to each one. Don't use placeholder entities with wildcard attributes—they won't match real policy conditions.
+When showing a list of resources (e.g., "all documents the user can view"), you need to authorize access to each one. Don't use placeholder entities with wildcard attributes—they won't match real policy conditions.
 
 ### Authorize Each Resource Individually
 
 ```typescript
-router.get('/contracts', async (req, res) => {
+router.get('/documents', async (req, res) => {
   const idToken = getIdToken(req);
-  const allContracts = getContracts();
+  const allDocuments = getDocuments();
 
   const authResults = await Promise.all(
-    allContracts.map(contract =>
+    allDocuments.map(doc =>
       client.authorize({
         token: idToken,
-        action: 'REVIEW',
-        resource: { type: 'Contract', id: contract.id },
-        additionalEntities: [buildContractEntity(contract)],
+        action: 'VIEW',
+        resource: { type: 'Document', id: doc.id },
+        additionalEntities: [buildDocumentEntity(doc)],
       })
     )
   );
 
-  const authorizedContracts = allContracts.filter((_, i) => authResults[i].allowed);
-  res.json({ contracts: authorizedContracts });
+  const authorizedDocuments = allDocuments.filter((_, i) => authResults[i].allowed);
+  res.json({ documents: authorizedDocuments });
 });
 ```
 
@@ -215,8 +214,8 @@ Don't filter resources in application code based on user attributes:
 
 ```typescript
 // Avoid this—it duplicates policy logic
-const userRegion = claims['custom:user_region'];
-const visibleContracts = allContracts.filter(c => c.region === userRegion);
+const userDepartment = claims['custom:department'];
+const visibleDocs = allDocuments.filter(d => d.department === userDepartment);
 ```
 
 Let the policy engine make authorization decisions. This keeps policy changes from requiring code changes.
@@ -271,10 +270,10 @@ Pass raw values. Don't translate:
 
 ```typescript
 // Correct
-attrs: { Government: contract.government }  // Passes "Y" or "N" as stored
+attrs: { classification: resource.classification }  // Passes "Y" or "N" as stored
 
 // Wrong
-attrs: { Government: contract.government === 'Y' ? 'TRUE' : 'FALSE' }
+attrs: { classification: resource.classification === 'Y' ? 'TRUE' : 'FALSE' }
 ```
 
 ---
@@ -320,31 +319,31 @@ export async function initializeCACClient(): Promise<void> {
   });
 }
 
-export function buildContractEntity(contract: Contract) {
+export function buildDocumentEntity(document: Document) {
   return {
-    uid: { type: `${NAMESPACE}::Contract`, id: contract.id },
+    uid: { type: `${NAMESPACE}::Document`, id: document.id },
     attrs: {
-      Region: contract.region,
-      Size: contract.size,
-      Client: contract.client,
-      Status: contract.status,
+      department: document.department,
+      classification: document.classification,
+      owner: document.owner,
+      status: document.status,
     },
     parents: [],
   };
 }
 
-export async function authorizeContractAction(
+export async function authorizeDocumentAction(
   idToken: string,
   action: string,
-  contract: Contract
+  document: Document
 ): Promise<boolean> {
   if (!authClient) throw new Error('CAC client not initialized');
 
   const result = await authClient.authorize({
     token: idToken,
     action,
-    resource: { type: 'Contract', id: contract.id },
-    additionalEntities: [buildContractEntity(contract)],
+    resource: { type: 'Document', id: document.id },
+    additionalEntities: [buildDocumentEntity(document)],
   });
 
   return result.allowed;
@@ -371,20 +370,20 @@ start();
 ### Route Handler
 
 ```typescript
-// src/routes/contracts.ts
-import { authorizeContractAction } from '../lib/cac-client';
+// src/routes/documents.ts
+import { authorizeDocumentAction } from '../lib/cac-client';
 
 router.get('/:id', async (req, res) => {
   const idToken = req.headers['x-id-token'] as string;
   if (!idToken) return res.status(401).json({ error: 'Missing ID token' });
 
-  const contract = getContractById(req.params.id);
-  if (!contract) return res.status(404).json({ error: 'Contract not found' });
+  const document = getDocumentById(req.params.id);
+  if (!document) return res.status(404).json({ error: 'Document not found' });
 
-  const allowed = await authorizeContractAction(idToken, 'REVIEW', contract);
+  const allowed = await authorizeDocumentAction(idToken, 'VIEW', document);
   if (!allowed) return res.status(403).json({ error: 'Access denied' });
 
-  res.json({ contract });
+  res.json({ document });
 });
 ```
 
@@ -425,8 +424,8 @@ cd node_modules/cognito-authorization-client && npm run build
 Include the resource in `additionalEntities`:
 ```typescript
 additionalEntities: [{
-  uid: { type: 'MyApp::Contract', id: 'contract-123' },
-  attrs: { Region: 'US', Status: 'Active' },
+  uid: { type: 'MyApp::Document', id: 'doc-123' },
+  attrs: { department: 'Engineering', status: 'Active' },
   parents: [],
 }]
 ```
