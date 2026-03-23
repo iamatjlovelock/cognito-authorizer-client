@@ -15,6 +15,17 @@ A local authorization client for Amazon Cognito customers using Cedar policies. 
 - **Schema Validation** - Cedar schema validation in strict mode
 - **Transparency Files** - Local copies of AVP policies and schema for debugging
 
+## Integration Guides
+
+Two integration guides are available depending on your needs:
+
+| Guide | Audience | Description |
+|-------|----------|-------------|
+| [cac-integration-guide-humans.md](./cac-integration-guide-humans.md) | Human engineers | Narrative guide with explanations, examples, and troubleshooting. Start here if you're integrating CAC into your application. |
+| [cac-integration-guide-agents.md](./cac-integration-guide-agents.md) | AI coding agents | Structured reference with verification steps and questions to ask. Optimized for LLM-assisted development workflows. |
+
+Both guides cover the same technical content—choose based on who (or what) is doing the integration work.
+
 ## Installation
 
 ```bash

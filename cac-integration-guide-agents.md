@@ -22,6 +22,9 @@ This document provides everything a coding agent needs to integrate the Cognito 
 | **Stale local schema copy** | Integration uses wrong attribute names | Always fetch fresh schema from AVP with `aws verifiedpermissions get-schema` |
 | **Renaming attributes in mapping** | `attributeMapping` transforms `user_region` to `Region` | Only strip `custom:` prefix - don't rename (e.g., `custom:user_region` → `user_region`) |
 | **Placeholder entity for list authorization** | Error: `entity "...::any" does not exist` or policy denies with wildcard attributes | Don't use placeholder entities - authorize each resource individually (see "Authorizing Resource Lists") |
+| **Schema attributes marked required but missing from token** | Authorization fails for users missing optional attributes | Mark user attributes as `"required": false` unless guaranteed present |
+| **Namespace mismatch between schema and config** | Entity types not found during authorization | Ensure `cedar.namespace` in CAC config matches schema namespace exactly |
+| **User not in memberOfTypes for CognitoGroup** | Group-based policies don't work | User entity must have `"memberOfTypes": ["CognitoGroup"]` |
 
 ---
 
@@ -40,9 +43,478 @@ Before integration, ensure:
 1. The target application uses Node.js/TypeScript
 2. Users authenticate via Amazon Cognito
 3. **The application can access Cognito ID tokens** (not just access tokens - see "Critical: ID Token vs Access Token" section)
-4. Cedar policies exist (either in AVP or as local files)
+4. Cedar policies exist (either in AVP or as local files) - **or create a new policy store using the "Creating an AVP Policy Store from Scratch" section below**
 5. AWS credentials are configured (for AVP integration)
 6. **If a Pre-Token Generation Lambda exists**, it passes through custom attributes (see "Critical: Pre-Token Generation Lambda Triggers" section)
+
+---
+
+## Creating an AVP Policy Store from Scratch
+
+**Use this section when no policy store exists yet for the application.** If a policy store already exists, skip to "Pre-Integration Verification Steps".
+
+### Step 1: Gather Required Information
+
+Ask the developer:
+
+```
+Q1: What is your Cognito User Pool ID?
+    Format: {region}_{poolId} (e.g., us-east-1_ABC123xyz)
+
+Q2: What AWS region should the policy store be created in?
+    (Should match your Cognito User Pool region)
+
+Q3: What is the name of your application?
+    (Used for the policy store description)
+
+Q4: What Cedar namespace should be used?
+    Example: MyApp, ContractManager, NAMESPACE
+    This appears in policy statements like: MyApp::User, MyApp::Action::"REVIEW"
+```
+
+### Step 2: Check for Existing Policy Store
+
+Check if a policy store already exists with the Cognito User Pool ID as an alias:
+
+```bash
+# List all policy stores and check for matching alias
+aws verifiedpermissions list-policy-stores \
+  --region us-east-1 \
+  --output json | jq '.policyStores[] | select(.description | contains("USER_POOL_ID"))'
+
+# Or search by listing all and checking aliases
+aws verifiedpermissions list-policy-stores \
+  --region us-east-1 \
+  --query 'policyStores[*].[id,arn,description]' \
+  --output table
+```
+
+**If a policy store with this user pool alias exists:**
+
+Ask the developer:
+```
+A policy store already exists with alias matching User Pool ID: {USER_POOL_ID}
+Policy Store ID: {EXISTING_POLICY_STORE_ID}
+
+Do you want to:
+a) Use the existing policy store (skip creation)
+b) Delete the existing policy store and create a new one
+
+WARNING: Option (b) will permanently delete all existing policies in that store.
+```
+
+If the developer chooses (b), delete the existing policy store:
+
+```bash
+aws verifiedpermissions delete-policy-store \
+  --policy-store-id EXISTING_POLICY_STORE_ID \
+  --region us-east-1
+```
+
+### Step 3: Create the Policy Store
+
+Create a new policy store with the user pool ID as the alias (in description):
+
+```bash
+aws verifiedpermissions create-policy-store \
+  --validation-settings "mode=STRICT" \
+  --description "Policy store for APPLICATION_NAME (Cognito User Pool: USER_POOL_ID)" \
+  --region us-east-1
+```
+
+Save the returned `policyStoreId` - you'll need it for subsequent commands.
+
+### Step 4: Retrieve Cognito User Pool Schema Information
+
+Fetch the user pool configuration to understand available attributes:
+
+```bash
+# Get user pool details including schema
+aws cognito-idp describe-user-pool \
+  --user-pool-id USER_POOL_ID \
+  --region us-east-1 \
+  --output json > cognito-user-pool.json
+
+# Extract custom attributes
+cat cognito-user-pool.json | jq '.UserPool.SchemaAttributes[] | select(.Name | startswith("custom:"))'
+
+# Get app client configuration to check required attributes
+aws cognito-idp describe-user-pool-client \
+  --user-pool-id USER_POOL_ID \
+  --client-id APP_CLIENT_ID \
+  --region us-east-1 \
+  --query 'UserPoolClient.ReadAttributes'
+```
+
+**From the user pool schema, identify:**
+- Custom attributes (those starting with `custom:`)
+- Which attributes are required vs optional
+- Attribute data types (String, Number, etc.)
+
+### Step 5: Build the Cedar Schema
+
+The Cedar schema defines entity types, their attributes, and actions. Build it incrementally:
+
+#### 5a: Define the CognitoGroup Entity Type
+
+This entity represents Cognito user groups. It typically has no attributes of its own:
+
+```json
+{
+  "NAMESPACE": {
+    "entityTypes": {
+      "CognitoGroup": {
+        "shape": {
+          "type": "Record",
+          "attributes": {}
+        }
+      }
+    }
+  }
+}
+```
+
+#### 5b: Define the User Entity Type
+
+Map Cognito user attributes to Cedar User entity attributes. **Remove the `custom:` prefix** from custom attributes:
+
+| Cognito Attribute | Cedar Attribute | Type | Required |
+|-------------------|-----------------|------|----------|
+| `sub` | `sub` | String | Yes |
+| `email` | `email` | String | Based on app client |
+| `cognito:groups` | (handled via parents) | - | - |
+| `custom:user_type` | `user_type` | String | Based on app client |
+| `custom:user_region` | `user_region` | String | Based on app client |
+
+**Determining Required vs Optional:**
+- Check the app client's `ReadAttributes` and `WriteAttributes`
+- If an attribute is in `WriteAttributes` but not marked as required in the user pool schema, make it optional in Cedar
+- When in doubt, make attributes optional (use `"required": false`) to avoid authorization failures
+
+Example User entity:
+
+```json
+"User": {
+  "memberOfTypes": ["CognitoGroup"],
+  "shape": {
+    "type": "Record",
+    "attributes": {
+      "sub": { "type": "String" },
+      "email": { "type": "String" },
+      "user_type": { "type": "String", "required": false },
+      "user_region": { "type": "String", "required": false }
+    }
+  }
+}
+```
+
+#### 5c: Ask About Resource Types
+
+Ask the developer:
+
+```
+What types of resources does your application manage access to?
+
+Examples:
+- Contract, Document, Report (for document management apps)
+- Project, Task, Sprint (for project management apps)
+- Order, Product, Customer (for e-commerce apps)
+- Account, Transaction, Portfolio (for financial apps)
+
+List the resource types that should be protected by authorization policies:
+```
+
+**Scan the application code** to identify candidate resource types:
+- Look for database models/entities
+- Look for API route patterns (e.g., `/contracts/:id`, `/projects/:id`)
+- Look for TypeScript/JavaScript interfaces or types
+- Look for class definitions representing business objects
+
+Present findings to the developer:
+
+```
+Based on scanning the application code, I found these potential resource types:
+
+1. Contract (found in: src/models/contract.ts, src/routes/contracts.ts)
+   - Properties: id, region, client, status, size, government
+
+2. Report (found in: src/models/report.ts)
+   - Properties: id, type, author, department
+
+Please confirm which resource types should be included in the authorization schema,
+and which properties should be available for policy conditions.
+
+NOTE: Properties you include will appear in dropdown lists in the Amazon Verified
+Permissions console when creating attribute-based policies. Only include properties
+that are relevant for authorization decisions.
+```
+
+#### 5d: Define Resource Entity Types
+
+For each confirmed resource type, create an entity definition:
+
+```json
+"Contract": {
+  "shape": {
+    "type": "Record",
+    "attributes": {
+      "Region": { "type": "String" },
+      "Client": { "type": "String" },
+      "Status": { "type": "String" },
+      "Size": { "type": "String" },
+      "Government": { "type": "String" }
+    }
+  }
+}
+```
+
+**Important notes for the developer:**
+- These attributes will appear in dropdown lists in the Cognito Console when creating attribute-based policies
+- Only include attributes that are relevant for authorization decisions
+- Attribute names are case-sensitive and must match exactly what the application provides in `additionalEntities`
+
+#### 5e: Define Actions
+
+Scan the application code to identify candidate actions:
+- Look for route handlers (GET, POST, PUT, DELETE patterns)
+- Look for method names suggesting operations (create, read, update, delete, approve, archive)
+- Look for permission checks or role-based logic
+
+Ask the developer:
+
+```
+Based on scanning the application code, I found these potential actions for each resource:
+
+Contract:
+- REVIEW (found: GET /contracts/:id, viewContract function)
+- EDIT (found: PUT /contracts/:id, updateContract function)
+- APPROVE (found: POST /contracts/:id/approve)
+- ARCHIVE (found: DELETE /contracts/:id)
+- CREATE (found: POST /contracts)
+
+Report:
+- VIEW (found: GET /reports/:id)
+- GENERATE (found: POST /reports/generate)
+- EXPORT (found: GET /reports/:id/export)
+
+Please confirm which actions should be included for each resource type.
+You can also add actions that aren't in the code yet but will be needed.
+```
+
+Define actions in the schema:
+
+```json
+"actions": {
+  "REVIEW": {
+    "appliesTo": {
+      "principalTypes": ["User"],
+      "resourceTypes": ["Contract"]
+    }
+  },
+  "EDIT": {
+    "appliesTo": {
+      "principalTypes": ["User"],
+      "resourceTypes": ["Contract"]
+    }
+  },
+  "APPROVE": {
+    "appliesTo": {
+      "principalTypes": ["User"],
+      "resourceTypes": ["Contract"]
+    }
+  },
+  "ARCHIVE": {
+    "appliesTo": {
+      "principalTypes": ["User"],
+      "resourceTypes": ["Contract"]
+    }
+  },
+  "VIEW": {
+    "appliesTo": {
+      "principalTypes": ["User"],
+      "resourceTypes": ["Report"]
+    }
+  },
+  "GENERATE": {
+    "appliesTo": {
+      "principalTypes": ["User"],
+      "resourceTypes": ["Report"]
+    }
+  }
+}
+```
+
+### Step 6: Assemble the Complete Schema
+
+Combine all entity types and actions into the complete schema:
+
+```json
+{
+  "NAMESPACE": {
+    "entityTypes": {
+      "CognitoGroup": {
+        "shape": {
+          "type": "Record",
+          "attributes": {}
+        }
+      },
+      "User": {
+        "memberOfTypes": ["CognitoGroup"],
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "sub": { "type": "String" },
+            "email": { "type": "String" },
+            "user_type": { "type": "String", "required": false },
+            "user_region": { "type": "String", "required": false }
+          }
+        }
+      },
+      "Contract": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "Region": { "type": "String" },
+            "Client": { "type": "String" },
+            "Status": { "type": "String" },
+            "Size": { "type": "String" },
+            "Government": { "type": "String" }
+          }
+        }
+      }
+    },
+    "actions": {
+      "REVIEW": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Contract"]
+        }
+      },
+      "EDIT": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Contract"]
+        }
+      },
+      "APPROVE": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Contract"]
+        }
+      },
+      "ARCHIVE": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Contract"]
+        }
+      }
+    }
+  }
+}
+```
+
+**Replace `NAMESPACE` with the actual namespace confirmed by the developer.**
+
+### Step 7: Upload the Schema to AVP
+
+Save the schema to a file and upload it:
+
+```bash
+# Save schema to file (ensure it's valid JSON)
+cat > cedar-schema.json << 'EOF'
+{
+  "NAMESPACE": {
+    ... (schema content)
+  }
+}
+EOF
+
+# Upload schema to AVP
+aws verifiedpermissions put-schema \
+  --policy-store-id POLICY_STORE_ID \
+  --definition "cedarJson=$(cat cedar-schema.json | jq -c '.')" \
+  --region us-east-1
+```
+
+Alternative using file input:
+
+```bash
+# Create the definition file
+echo "{\"cedarJson\": $(cat cedar-schema.json | jq -c '.' | jq -Rs '.')}" > schema-definition.json
+
+# Upload
+aws verifiedpermissions put-schema \
+  --policy-store-id POLICY_STORE_ID \
+  --definition file://schema-definition.json \
+  --region us-east-1
+```
+
+### Step 8: Verify the Schema
+
+Confirm the schema was uploaded correctly:
+
+```bash
+aws verifiedpermissions get-schema \
+  --policy-store-id POLICY_STORE_ID \
+  --region us-east-1 \
+  --query 'schema' \
+  --output text | jq '.'
+```
+
+### Summary: Questions to Ask When Creating Policy Store
+
+| Step | Question |
+|------|----------|
+| 1 | What is your Cognito User Pool ID? |
+| 1 | What AWS region? |
+| 1 | What is the application name? |
+| 1 | What Cedar namespace? |
+| 2 | (If exists) Delete existing policy store or use it? |
+| 5c | What resource types does the application manage? |
+| 5c | Which resource properties should be usable in policies? |
+| 5e | Which actions should be defined for each resource? |
+
+### Cedar Schema Reference
+
+**Supported attribute types:**
+- `String` - Text values
+- `Long` - Integer numbers
+- `Boolean` - true/false
+- `Set` - Collection of values (requires `element` type)
+- `Record` - Nested object with attributes
+- `Entity` - Reference to another entity type (requires `name`)
+
+**Making attributes optional:**
+```json
+"attributeName": { "type": "String", "required": false }
+```
+
+**Entity parent relationships:**
+```json
+"User": {
+  "memberOfTypes": ["CognitoGroup", "Department"],
+  ...
+}
+```
+
+**Action groups (for related actions):**
+```json
+"actions": {
+  "readOnly": {
+    "appliesTo": {
+      "principalTypes": [],
+      "resourceTypes": []
+    }
+  },
+  "VIEW": {
+    "memberOf": [{ "id": "readOnly" }],
+    "appliesTo": {
+      "principalTypes": ["User"],
+      "resourceTypes": ["Contract"]
+    }
+  }
+}
+```
 
 ---
 
@@ -696,6 +1168,7 @@ Q4: Where are your Cedar policies stored?
     Options:
     a) Amazon Verified Permissions (AVP) - recommended for production
     b) Local files - suitable for development/testing
+    c) No policy store exists yet - need to create one
 
 If AVP (option a):
     Q4a: What is your AVP Policy Store ID?
@@ -703,6 +1176,10 @@ If AVP (option a):
 
 If Local files (option b):
     Q4b: What is the path to your Cedar policies file?
+
+If No policy store (option c):
+    → Follow the "Creating an AVP Policy Store from Scratch" section above
+    → This will guide you through creating the policy store and Cedar schema
 ```
 
 ### 3. Cedar Namespace
