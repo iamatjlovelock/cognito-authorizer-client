@@ -15,8 +15,9 @@ Before diving in, here are the mistakes that trip up most integrations:
 | Attribute name case mismatch | Policy uses `Region`, code sends `region` | Cedar is case-sensitive—match exactly |
 | Translating attribute values | Policy expects `"Y"`, app sends `"TRUE"` | Pass raw values as stored |
 | Wrong GitHub repo URL | 404 during npm install | Use `cognito-authorizer-client` (not `cognito-authorization-client`) |
-| Missing `schemaOverrideIsInline` | TypeScript compilation error | Add `schemaOverrideIsInline: false` to AVP config |
+| Missing `schemaOverrideIsInline` | TypeScript compilation error | Add `schemaOverrideIsInline: false` to config |
 | Placeholder entities for list authorization | Wildcard attributes don't match policies | Authorize each resource individually |
+| Schema missing CAC auto-generated attributes | Error: `attribute 'X' should not exist according to the schema` | Add all CAC auto-generated attributes to User and CognitoGroup entities (see below) |
 
 ---
 
@@ -28,6 +29,18 @@ The Cognito Authorization Client:
 - Maps Cognito token claims to Cedar entities automatically
 - Loads policies from Amazon Verified Permissions or local files
 - Works as an SDK embedded in your app or as a standalone HTTP service
+
+---
+
+## Integration Workflow Overview
+
+When working with a coding agent, integration follows three phases:
+
+1. **Phase 1: Policy Store Setup** — Create the policy store, upload Cedar schema, create group-based policies
+2. **Phase 2: Developer Review** — Review policies in the AWS Console before any code changes
+3. **Phase 3: Code Integration** — Install CAC, update routes, configure frontend
+
+**Important:** The coding agent will pause after Phase 1 and wait for you to review the policies in the AWS Console. This ensures authorization rules are correct before they're enforced in your application.
 
 ---
 
@@ -51,6 +64,24 @@ aws verifiedpermissions get-schema \
 
 Compare the User entity attributes in the schema with your ID token claims. The attribute names must match after stripping the `custom:` prefix.
 
+### CAC Auto-Generated Entity Attributes
+
+The CAC automatically adds certain attributes to User and CognitoGroup entities. **Your Cedar schema must include these attributes** or authorization will fail with `attribute 'X' should not exist according to the schema`.
+
+**User entity must include:**
+- `sub` (String) — Cognito user subject ID
+- `username` (String, optional) — Cognito username
+- `email` (String, optional) — User email
+- `email_verified` (Boolean, optional) — Whether email is verified
+- `name` (String, optional) — Display name
+- `scopes` (String, optional) — OAuth scopes
+- `groups` (Set of Strings, optional) — Cognito groups
+
+**CognitoGroup entity must include:**
+- `name` (String, optional) — Group name
+
+Plus any custom attributes from your Cognito User Pool (with `custom:` prefix stripped).
+
 ---
 
 ## Creating a Policy Store with a Coding Agent
@@ -68,12 +99,44 @@ If you don't have an AVP policy store yet, a coding agent can help you create on
 4. **Build the Cedar schema** — The agent will:
    - Retrieve your Cognito user attributes
    - Scan your application code to identify resource types (e.g., Document, Report)
-   - Ask you to confirm which resource properties should be available for policy conditions
+   - **Present a detailed list of resource attributes for your validation** (see "Resource Attribute Validation" below)
    - Define actions based on your API routes and business operations
 
 5. **Upload and verify the schema** — The schema is uploaded to AVP and validated.
 
 6. **Create sample authorization policies** — The agent walks you through creating initial policies to demonstrate how authorization works.
+
+### Resource Attribute Validation
+
+Before creating the schema, the agent will present a detailed table of resource attributes for your review:
+
+```
+For the resource type(s) you confirmed, here are the attributes I plan to include:
+
+Document:
+┌─────────────────┬─────────┬──────────┬─────────────────────────────────────┐
+│ Attribute       │ Type    │ Required │ Source                              │
+├─────────────────┼─────────┼──────────┼─────────────────────────────────────┤
+│ department      │ String  │ Yes      │ document.department                 │
+│ classification  │ String  │ Yes      │ document.classification             │
+│ owner           │ String  │ Yes      │ document.owner                      │
+│ status          │ String  │ Yes      │ document.status                     │
+└─────────────────┴─────────┴──────────┴─────────────────────────────────────┘
+
+Please review and confirm:
+1. Are these the correct attributes for authorization decisions?
+2. Should any attributes be added or removed?
+3. Are the data types correct?
+4. Should any attributes be marked as optional?
+```
+
+**Why this matters:**
+- Attribute names must match exactly what your application provides
+- Missing attributes can't be used in policy conditions
+- Extra attributes clutter the policy authoring experience in the console
+- Incorrect types cause authorization failures
+
+Reply "confirmed" to proceed, or provide corrections before the schema is created.
 
 ### Sample Policy Creation Process
 
@@ -394,7 +457,7 @@ export async function initializeCACClient(): Promise<void> {
     cedar: {
       namespace: NAMESPACE,
       source: 'avp' as const,
-      policyStoreId: process.env.AVP_POLICY_STORE_ID!,
+      policyStoreId: process.env.POLICY_STORE_ID!,
       loadSchemaFromAVP: true,
       schemaOverrideIsInline: false,
       refreshIntervalSeconds: 120,
@@ -523,6 +586,18 @@ additionalEntities: [{
 }]
 ```
 
+### Error: "attribute 'X' should not exist according to the schema"
+
+This means the CAC is sending attributes that aren't in your Cedar schema. Update your schema to include all CAC auto-generated attributes (see "CAC Auto-Generated Entity Attributes" above), then re-upload to the policy store:
+
+```bash
+# Update schema-definition.json and re-upload
+aws verifiedpermissions put-schema --policy-store-id POLICY_STORE_ID \
+  --definition file://schema-definition.json --region us-east-1
+```
+
+Restart your backend server after updating the schema.
+
 ---
 
 ## Environment Variables
@@ -531,7 +606,7 @@ additionalEntities: [{
 AWS_REGION=us-east-1
 USER_POOL_ID=us-east-1_ABC123xyz
 USER_POOL_CLIENT_ID=1abc2defg3hijklmno4pqrs5t
-AVP_POLICY_STORE_ID=BWRtaygo7MkaFaBz8BbHHz
+POLICY_STORE_ID=BWRtaygo7MkaFaBz8BbHHz
 
 # AWS credentials (or use IAM role)
 AWS_ACCESS_KEY_ID=...
