@@ -118,10 +118,10 @@ aws_session_token = YOUR_SESSION_TOKEN
 
 ### Step 1: Get Cognito User Pool ID
 
-Inform the developer:
+Ask the developer:
 
 ```
-Cognito User pool
+What is your Cognito User Pool ID?
 Format: {region}_{poolId} (e.g., us-east-1_ABC123xyz)
 ```
 
@@ -453,7 +453,7 @@ Define actions in the schema:
 }
 ```
 
-### Step 7: Assemble the Complete Schema
+### Step 6: Assemble the Complete Schema
 
 Combine all entity types and actions into the complete schema. **Remember to include all CAC auto-generated attributes:**
 
@@ -975,15 +975,13 @@ The developer explicitly confirms:
 |------|----------|
 | 1 | What is your Cognito User Pool ID? |
 | 2 | (Auto-check: If existing stores found) Use existing store or delete and create new? |
-| 3 | What is the application name? |
-| 3 | What Cedar namespace? |
-| 6c | What resource types does the application manage? |
-| 6c | **⚠️ VALIDATION: Confirm resource attribute list before proceeding** |
-| 6e | Which actions should be defined for each resource? |
-| 10a | Which Cognito group should have a policy? |
-| 10b | Which actions should the group be permitted to perform? |
-| 10c | Should access be restricted by a resource attribute condition? |
-| 10f | Would you like to create additional policies? |
+| 5c | What resource types does the application manage? |
+| 5c | **⚠️ VALIDATION: Confirm resource attribute list before proceeding** |
+| 5e | Which actions should be defined for each resource? |
+| 9a | Which Cognito group should have a policy? |
+| 9b | Which actions should the group be permitted to perform? |
+| 9c | Should access be restricted by a resource attribute condition? |
+| 9f | Would you like to create additional policies? |
 
 ### Cedar Schema Reference
 

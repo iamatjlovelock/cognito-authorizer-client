@@ -1,6 +1,6 @@
 # Cognito Authorization Client - Integration Guide
 
-This guide walks you through integrating the Cognito Authorization Client (CAC) into your application. CAC provides local Cedar policy evaluation using WebAssembly, with policies loaded from Amazon Verified Permissions (AVP) or local files.
+This guide walks you through integrating the Cognito Authorization Client (CAC) into your application. CAC provides local Cedar policy evaluation using WebAssembly, with policies loaded from Cognito Policy Store or local files.
 
 ---
 
@@ -50,7 +50,7 @@ When working with a coding agent, integration follows three phases:
 
 Decode a sample ID token (use jwt.io) and confirm it includes the custom attributes your policies need. If you have a Pre-Token Generation Lambda trigger, check that it passes through these attributes in `claimsToAddOrOverride`.
 
-### Fetch Your AVP Schema
+### Fetch Your Cognito Policy Store Schema
 
 Always work from the live schema, not a cached copy:
 
@@ -86,7 +86,7 @@ Plus any custom attributes from your Cognito User Pool (with `custom:` prefix st
 
 ## Creating a Policy Store with a Coding Agent
 
-If you don't have an AVP policy store yet, a coding agent can help you create one from scratch. Here's what to expect during that process:
+If you don't have an Cognito Policy Store yet, a coding agent can help you create one from scratch. Here's what to expect during that process:
 
 ### What the Agent Will Do
 
@@ -94,7 +94,7 @@ If you don't have an AVP policy store yet, a coding agent can help you create on
 
 2. **Check for existing policy stores** — It will look for any policy store already associated with your user pool to avoid duplicates.
 
-3. **Create the policy store** — A new AVP policy store will be created and tagged with your Cognito User Pool ID for easy identification.
+3. **Create the policy store** — A new Cognito Policy Store will be created and tagged with your Cognito User Pool ID for easy identification.
 
 4. **Build the Cedar schema** — The agent will:
    - Retrieve your Cognito user attributes
@@ -102,7 +102,7 @@ If you don't have an AVP policy store yet, a coding agent can help you create on
    - **Present a detailed list of resource attributes for your validation** (see "Resource Attribute Validation" below)
    - Define actions based on your API routes and business operations
 
-5. **Upload and verify the schema** — The schema is uploaded to AVP and validated.
+5. **Upload and verify the schema** — The schema is uploaded to the Cognito Policy Store and validated.
 
 6. **Create sample authorization policies** — The agent walks you through creating initial policies to demonstrate how authorization works.
 
@@ -146,7 +146,7 @@ After the schema is set up, the agent helps you create sample policies:
 
 2. **Attribute-based conditions** — The agent will show you the resource attributes from your schema and ask if you want to add conditions. For example: "Should Reviewers only be able to view documents with status 'Draft' or 'Review'?"
 
-3. **Policy generation** — Based on your answers, the agent converts your requirements into Cedar policy syntax and creates the policy in AVP.
+3. **Policy generation** — Based on your answers, the agent converts your requirements into Cedar policy syntax and creates the policy in the Cognito Policy Store.
 
 4. **Additional policies** — You can create more policies for other groups, owner-based access, or admin full access.
 
@@ -185,7 +185,7 @@ Agent: Creating policy:
 
 Once your policy store is created, you don't need a coding agent to maintain policies. You can manage authorization policies directly in the AWS Console:
 
-1. **Navigate to Amazon Verified Permissions** in the AWS Console
+1. **Navigate to Cognito Policy Store** in the AWS Console
 2. **Select your policy store** (tagged with your Cognito User Pool ID)
 3. **Create and edit policies** using the visual policy editor or Cedar syntax
 
@@ -205,7 +205,7 @@ This visual approach is ideal for:
 - Quick policy updates that don't require a development cycle
 - Experimenting with different authorization rules
 
-The CAC automatically picks up policy changes from AVP based on the `refreshIntervalSeconds` configuration (default: 120 seconds).
+The CAC automatically picks up policy changes from the Cognito Policy Store based on the `refreshIntervalSeconds` configuration (default: 120 seconds).
 
 ---
 
@@ -554,7 +554,7 @@ If running CAC as a standalone service:
 | `/authorize` | POST | Single authorization request |
 | `/batch-authorize` | POST | Multiple authorization requests |
 | `/validate-token` | POST | Validate token without authorization |
-| `/refresh-policies` | POST | Force reload policies from AVP |
+| `/refresh-policies` | POST | Force reload policies from the Cognito Policy Store |
 | `/health` | GET | Health check |
 
 ---
