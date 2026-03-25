@@ -26,6 +26,13 @@ Two integration guides are available depending on your needs:
 
 Both guides cover the same technical content—choose based on who (or what) is doing the integration work.
 
+### Integration Workflow
+
+The guides follow a three-phase approach:
+1. **Phase 1: Policy Store Setup** — Create the policy store, upload Cedar schema, create group-based policies for Cognito groups
+2. **Phase 2: Developer Review** — Review policies in the AWS Console before code changes (mandatory pause point)
+3. **Phase 3: Code Integration** — Install CAC package, update routes, configure frontend to send ID token
+
 ## Installation
 
 ```bash
@@ -174,6 +181,28 @@ cp policies.example.cedar policies.cedar
 | `includeProfileClaims` | boolean | Include profile claims (email, name, etc.) |
 | `attributeMapping` | object | Map token claims to Cedar attribute names |
 
+### CAC Auto-Generated Entity Attributes
+
+**Important:** The CAC automatically adds attributes to User and CognitoGroup entities from the token. Your Cedar schema **must include these attributes** or authorization will fail with `attribute 'X' should not exist according to the schema`.
+
+**User entity attributes (include all in schema):**
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `sub` | String | Cognito user subject ID (required) |
+| `username` | String | Cognito username |
+| `email` | String | User email address |
+| `email_verified` | Boolean | Whether email is verified |
+| `name` | String | User display name |
+| `scopes` | String | OAuth scopes (space-separated) |
+| `groups` | Set\<String\> | Cognito groups the user belongs to |
+
+**CognitoGroup entity attributes:**
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `name` | String | Group name |
+
+Mark all except `sub` as `"required": false` in your schema.
+
 ### Attribute Mapping
 
 The `attributeMapping` configuration maps Cognito token claims to Cedar entity attributes:
@@ -202,7 +231,7 @@ This maps:
 | `CEDAR_SOURCE` | `file` or `avp` |
 | `CEDAR_POLICIES_PATH` | Path to policies (file source) |
 | `CEDAR_SCHEMA_PATH` | Path to schema (file source) |
-| `AVP_POLICY_STORE_ID` | AVP policy store ID |
+| `POLICY_STORE_ID` | Policy store ID |
 | `AVP_LOAD_SCHEMA` | Load schema from AVP (`true`/`false`) |
 | `AVP_REFRESH_INTERVAL` | Refresh interval in seconds |
 | `PORT` | Server port |

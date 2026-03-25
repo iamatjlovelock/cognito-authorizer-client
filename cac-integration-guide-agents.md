@@ -80,40 +80,6 @@ Only after the developer confirms the policies are correct:
 
 ---
 
-## Quick Start (Experienced Users)
-
-For those familiar with Cedar policies, here's the condensed setup:
-
-1. **Create policy store:**
-   ```bash
-   aws verifiedpermissions create-policy-store --validation-settings "mode=STRICT" \
-     --description "Policy store for APP_NAME (Cognito User Pool: USER_POOL_ID)" --region us-east-1
-   ```
-
-2. **Fetch Cognito custom attributes:**
-   ```bash
-   aws cognito-idp describe-user-pool --user-pool-id USER_POOL_ID \
-     --query 'UserPool.SchemaAttributes[?starts_with(Name, `custom:`)]' --region us-east-1
-   ```
-
-3. **Fetch Cognito groups:**
-   ```bash
-   aws cognito-idp list-groups --user-pool-id USER_POOL_ID --region us-east-1
-   ```
-
-4. **Build Cedar schema** with: User entity (from Cognito attrs, strip `custom:` prefix), Resource entity (from app data), CognitoGroup entity
-
-5. **Upload schema:**
-   ```bash
-   aws verifiedpermissions put-schema --policy-store-id POLICY_STORE_ID \
-     --definition file://schema-definition.json --region us-east-1
-   ```
-
-6. **Create policies** for each Cognito group
-
-Detailed walkthrough follows below.
-
----
 
 ## Prerequisites
 
@@ -152,10 +118,10 @@ aws_session_token = YOUR_SESSION_TOKEN
 
 ### Step 1: Get Cognito User Pool ID
 
-Ask the developer:
+Inform the developer:
 
 ```
-What is your Cognito User Pool ID?
+Cognito User pool
 Format: {region}_{poolId} (e.g., us-east-1_ABC123xyz)
 ```
 
@@ -171,6 +137,7 @@ aws verifiedpermissions list-policy-stores \
 
 Parse the results and filter for policy stores where the `description` contains the User Pool ID.
 
+**If no matching policy stores are found**, proceed directly to Step 3.
 **If matching policy stores are found**, present them to the developer:
 
 ```
@@ -201,26 +168,8 @@ aws verifiedpermissions delete-policy-store \
 
 Then proceed to Step 3.
 
-**If no matching policy stores are found**, proceed directly to Step 3.
 
-### Step 3: Gather Additional Information
-
-Ask the developer:
-
-```
-Q1: What is the name of your application?
-    (e.g., "Contract Management System", "Document Portal")
-
-    IMPORTANT: This is the business application whose resources will be protected
-    by authorization policies. This is NOT the name of admin tools or policy
-    management UIs that configure policies.
-
-Q2: What Cedar namespace should be used?
-    Example: MyApp, TaskManager, ContractMgt
-    This appears in policy statements like: MyApp::User, MyApp::Action::"VIEW"
-```
-
-### Step 4: Create the Cognito Policy Store
+### Step 3: Create the Cognito Policy Store
 
 Create a new policy store. **Always include the User Pool ID in the description** - this allows future lookups to find the correct store:
 
@@ -233,7 +182,7 @@ aws verifiedpermissions create-policy-store \
 
 Save the returned `policyStoreId` - you'll need it for subsequent commands.
 
-### Step 5: Retrieve Cognito User Pool Schema Information
+### Step 4: Retrieve Cognito User Pool Schema Information
 
 Fetch the user pool configuration to understand available attributes:
 
@@ -260,11 +209,11 @@ aws cognito-idp describe-user-pool-client \
 - Which attributes are required vs optional
 - Attribute data types (String, Number, etc.)
 
-### Step 6: Build the Cedar Schema
+### Step 5: Build the Cedar Schema
 
 The Cedar schema defines entity types, their attributes, and actions. Build it incrementally:
 
-#### 6a: Define the CognitoGroup Entity Type
+#### 5a: Define the CognitoGroup Entity Type
 
 This entity represents Cognito user groups. **IMPORTANT:** The CAC automatically adds a `name` attribute to CognitoGroup entities, so the schema must include it:
 
@@ -287,7 +236,7 @@ This entity represents Cognito user groups. **IMPORTANT:** The CAC automatically
 
 > **Warning:** If you define CognitoGroup with empty attributes `{}`, authorization will fail with error: `attribute 'name' on 'NAMESPACE::CognitoGroup::"group-name"' should not exist according to the schema`
 
-#### 6b: Define the User Entity Type
+#### 5b: Define the User Entity Type
 
 **IMPORTANT: CAC Auto-Generated Attributes**
 
@@ -351,24 +300,10 @@ Map custom attributes by **removing the `custom:` prefix**:
 
 > **Warning:** If you omit CAC auto-generated attributes from the schema, authorization will fail even if your policies don't use those attributes. The Cedar validator checks all entity attributes against the schema.
 
-#### 6c: Ask About Resource Types
+#### 5c: Ask About Resource Types
 
 > **Note:** This guide uses "Document" as an example resource type. Replace with your actual resource type (e.g., "Contract", "Report", "Order", "Task").
 
-Ask the developer:
-
-```
-What types of resources does your application manage access to?
-
-Examples:
-- Document, Report, File (for document management apps)
-- Contract, Agreement, Amendment (for legal/contract management apps)
-- Project, Task, Sprint (for project management apps)
-- Order, Product, Customer (for e-commerce apps)
-- Account, Transaction, Portfolio (for financial apps)
-
-List the resource types that should be protected by authorization policies:
-```
 
 **Scan the application code** to identify candidate resource types:
 - Look for database models/entities
@@ -405,8 +340,7 @@ Document:
 │ status          │ String  │ Yes      │ document.status                     │
 └─────────────────┴─────────┴──────────┴─────────────────────────────────────┘
 
-NOTE: These attributes will appear in dropdown lists in the Amazon Verified
-Permissions console when creating attribute-based policies. Only include
+NOTE: These attributes will appear in dropdown lists in the Cognito console when creating attribute-based policies. Only include
 attributes that are relevant for authorization decisions.
 
 Please review and confirm:
@@ -418,7 +352,7 @@ Please review and confirm:
 Reply "confirmed" to proceed, or provide corrections.
 ```
 
-**⚠️ WAIT for the developer to confirm the attribute list before proceeding to step 6d.**
+**WAIT for the developer to confirm the attribute list before proceeding to step 5d.**
 
 This validation is important because:
 - Attribute names in the schema must match exactly what the application provides
@@ -426,7 +360,7 @@ This validation is important because:
 - Extra attributes clutter the policy authoring experience
 - Incorrect types cause authorization failures
 
-#### 6d: Define Resource Entity Types
+#### 5d: Define Resource Entity Types
 
 For each confirmed resource type, create an entity definition:
 
@@ -449,7 +383,7 @@ For each confirmed resource type, create an entity definition:
 - Only include attributes that are relevant for authorization decisions
 - Attribute names are case-sensitive and must match exactly what the application provides in `additionalEntities`
 
-#### 6e: Define Actions
+#### 5e: Define Actions
 
 Scan the application code to identify candidate actions:
 - Look for route handlers (GET, POST, PUT, DELETE patterns)
@@ -596,7 +530,7 @@ Combine all entity types and actions into the complete schema. **Remember to inc
 
 **Replace `NAMESPACE` with the actual namespace confirmed by the developer.**
 
-### Step 8: Upload the Schema
+### Step 7: Upload the Schema
 
 Save the schema to a `cedar-schema.json` file, then create a definition file and upload it.
 
@@ -625,7 +559,7 @@ aws verifiedpermissions put-schema \
 > echo "{\"cedarJson\": $(cat cedar-schema.json | jq -c '.' | jq -Rs '.')}" > schema-definition.json
 > ```
 
-### Step 9: Verify the Schema
+### Step 8: Verify the Schema
 
 Confirm the schema was uploaded correctly:
 
@@ -649,11 +583,11 @@ aws verifiedpermissions get-schema --policy-store-id POLICY_STORE_ID --region us
   --query 'schema' --output text | jq '.'
 ```
 
-### Step 10: Create Sample Authorization Policies
+### Step 9: Create Sample Authorization Policies
 
 After the schema is uploaded, help the developer create sample authorization policies. This demonstrates how policies work and provides a starting point for their authorization logic.
 
-#### 10a: Check for Cognito User Pool Groups
+#### 9a: Check for Cognito User Pool Groups
 
 First, check if the Cognito User Pool has any groups defined:
 
@@ -682,7 +616,7 @@ Which group would you like to create a policy for?
 
 **If no groups exist**, skip to section 9d for attribute-based policies only.
 
-#### 10b: Create Group-Based Policy (Membership Permissions Pattern)
+#### 9b: Create Group-Based Policy (Membership Permissions Pattern)
 
 The Membership permissions pattern derives access rights from a principal's inclusion in a group. This is the Cedar equivalent of Role-Based Access Control (RBAC).
 
@@ -721,7 +655,7 @@ permit (
 );
 ```
 
-#### 10c: Add Attribute-Based Conditions to Group Policy
+#### 9c: Add Attribute-Based Conditions to Group Policy
 
 After defining the basic group policy, prompt the developer to add attribute-based conditions. This combines RBAC with Attribute-Based Access Control (ABAC).
 
@@ -783,7 +717,7 @@ permit (
 };
 ```
 
-#### 10d: Create the Policy in the Policy Store
+#### 9d: Create the Policy in the Policy Store
 
 Once the developer confirms the policy, create it in the policy store:
 
@@ -850,7 +784,7 @@ aws verifiedpermissions create-policy \
   --region us-east-1
 ```
 
-#### 10e: Verify the Policy Was Created
+#### 9e: Verify the Policy Was Created
 
 ```bash
 # List policies in the store
@@ -861,7 +795,7 @@ aws verifiedpermissions list-policies \
   --output table
 ```
 
-#### 10f: Offer to Create Additional Policies
+#### 9f: Offer to Create Additional Policies
 
 After creating the first policy, ask the developer:
 
