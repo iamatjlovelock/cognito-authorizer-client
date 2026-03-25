@@ -6,14 +6,14 @@ A local authorization client for Amazon Cognito customers using Cedar policies. 
 
 - **Token Validation** - Validates Cognito ID and access tokens using JWKS
 - **Cedar Policy Evaluation** - Local policy evaluation using `@cedar-policy/cedar-wasm`
-- **Amazon Verified Permissions Integration** - Load policies and schema from AVP policy stores
+- **Cognito Policy Store Integration** - Load policies and schema from Cognito Policy Stores
 - **Automatic Cache Refresh** - Periodically checks for policy updates and reloads when changed
 - **Entity Mapping** - Automatically maps Cognito token claims to Cedar entities
 - **Group-Based Authorization** - Native support for Cognito user groups as Cedar parent entities
 - **HTTP API** - REST endpoints for authorization requests
 - **Batch Authorization** - Check multiple requests with a single token validation
 - **Schema Validation** - Cedar schema validation in strict mode
-- **Transparency Files** - Local copies of AVP policies and schema for debugging
+- **Transparency Files** - Local copies of policies and schema for debugging
 
 ## Integration Guides
 
@@ -25,6 +25,8 @@ Two integration guides are available depending on your needs:
 | [cac-integration-guide-agents.md](./cac-integration-guide-agents.md) | AI coding agents | Structured reference with verification steps and questions to ask. Optimized for LLM-assisted development workflows. |
 
 Both guides cover the same technical content—choose based on who (or what) is doing the integration work.
+
+> **Note on terminology:** The integration guides refer to "Cognito Policy Store" to represent Cognito's authorization policy management capability. Under the hood, the CAC integrates with Amazon Verified Permissions (AVP) to load policies—you'll see AVP-specific names in code (e.g., `loadSchemaFromAVP`, `policyStoreId`) but the guides present this as a Cognito feature.
 
 ### Integration Workflow
 
@@ -42,9 +44,9 @@ npm run build
 
 ## Quick Start
 
-### Using Amazon Verified Permissions (Recommended)
+### Using Cognito Policy Store (Recommended)
 
-1. Create a `config.json` with your AVP policy store:
+1. Create a `config.json` with your Cognito Policy Store:
 ```json
 {
   "cognito": {
@@ -149,14 +151,14 @@ cp policies.example.cedar policies.cedar
 
 ### Cedar Configuration Options
 
-#### AVP Source (`source: "avp"`)
+#### Cognito Policy Store Source (`source: "avp"`)
 
 | Option | Type | Description |
 |--------|------|-------------|
 | `namespace` | string | Cedar namespace for types |
-| `source` | `"avp"` | Use Amazon Verified Permissions |
-| `policyStoreId` | string | AVP policy store ID |
-| `loadSchemaFromAVP` | boolean | Load schema from AVP (default: true) |
+| `source` | `"avp"` | Use Cognito Policy Store |
+| `policyStoreId` | string | Policy store ID |
+| `loadSchemaFromAVP` | boolean | Load schema from policy store (default: true) |
 | `schemaOverride` | string | Optional local schema file path |
 | `schemaOverrideIsInline` | boolean | Whether schemaOverride is inline content |
 | `refreshIntervalSeconds` | number | Cache check interval in seconds (0 = disabled) |
@@ -232,7 +234,7 @@ This maps:
 | `CEDAR_POLICIES_PATH` | Path to policies (file source) |
 | `CEDAR_SCHEMA_PATH` | Path to schema (file source) |
 | `POLICY_STORE_ID` | Policy store ID |
-| `AVP_LOAD_SCHEMA` | Load schema from AVP (`true`/`false`) |
+| `AVP_LOAD_SCHEMA` | Load schema from policy store (`true`/`false`) |
 | `AVP_REFRESH_INTERVAL` | Refresh interval in seconds |
 | `PORT` | Server port |
 | `HOST` | Server host |
@@ -331,13 +333,13 @@ Validate a token without authorization.
 
 ### POST /refresh-policies
 
-Manually refresh policies from AVP.
+Manually refresh policies from the Cognito Policy Store.
 
 **Response:**
 ```json
 {
   "success": true,
-  "message": "Policies refreshed from AVP"
+  "message": "Policies refreshed from policy store"
 }
 ```
 
@@ -355,18 +357,18 @@ Health check endpoint.
 
 ## Cache Refresh Mechanism
 
-When using AVP as the policy source, the client automatically checks for policy updates:
+When using the Cognito Policy Store as the policy source, the client automatically checks for policy updates:
 
 1. On startup, records the policy store's `lastUpdatedDate`
 2. Every `refreshIntervalSeconds` seconds, checks the current `lastUpdatedDate`
-3. If the date has changed, reloads all policies and schema from AVP
+3. If the date has changed, reloads all policies and schema from the policy store
 4. Updates local transparency files (`avp-policies.txt`, `avp-schema.json`)
 
 Set `refreshIntervalSeconds: 0` to disable automatic cache checking.
 
 ## Transparency Files
 
-When loading from AVP, the client writes local copies for debugging:
+When loading from the Cognito Policy Store, the client writes local copies for debugging:
 
 ### avp-policies.txt
 ```
@@ -377,8 +379,8 @@ When loading from AVP, the client writes local copies for debugging:
 # Generated: 2024-01-15T12:00:00.000Z
 #
 # DO NOT EDIT THIS FILE DIRECTLY
-# All changes must be applied to the policy store in
-# Amazon Verified Permissions (AVP).
+# All changes must be applied to the Cognito Policy Store
+# in the AWS Console.
 # ============================================================
 
 @id("my-policy")
@@ -422,7 +424,7 @@ const config = {
   },
 };
 
-// Create client (async due to AVP policy loading)
+// Create client (async due to policy store loading)
 const client = await createClient(config);
 
 // Authorize a request
@@ -557,16 +559,16 @@ This enables `principal in MyApp::CognitoGroup::"admins"` policies to work corre
 │                     │     │  │ - Strict schema validation  │    │
 │                     │     │  └─────────────────────────────┘    │
 │                     │     │  ┌─────────────────────────────┐    │
-│                     │     │  │ AVP Policy Store            │    │
-│                     │     │  │ - Load policies from AVP    │    │
+│                     │     │  │ Policy Store Loader         │    │
+│                     │     │  │ - Load policies from store  │    │
 │                     │     │  │ - Cache refresh mechanism   │    │
 │                     │     │  └─────────────────────────────┘    │
 └─────────────────────┘     └─────────────────────────────────────┘
          │                              │                │
          ▼                              ▼                ▼
 ┌─────────────────────┐     ┌─────────────────┐  ┌─────────────────┐
-│  Cognito User Pool  │     │  Amazon Verified │  │  Local Policy   │
-│  (JWKS validation)  │     │  Permissions     │  │  Files          │
+│  Cognito User Pool  │     │ Cognito Policy  │  │  Local Policy   │
+│  (JWKS validation)  │     │ Store           │  │  Files          │
 └─────────────────────┘     └─────────────────┘  └─────────────────┘
 ```
 
